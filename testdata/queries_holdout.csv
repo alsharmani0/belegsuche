@@ -1,0 +1,17 @@
+suche;datei;seite;notiz
+GW-2019-118;Handy Fotos/IMG_2231.JPG;1;exakt: Rechnungsnummer anders getrennt (Dokument: GW 2019/118), Handyfoto
+EUR 5869,06;2025/Offene Posten/Abrechnung.pdf;1;exakt: Betrag mit vorangestelltem EUR, ohne Tausenderpunkt (Dokument: 5.869,06 €)
+GR 24-0102;Handy Fotos/IMG_7731.HEIC;1;exakt: Rechnungsnummer mit Leerzeichen (Dokument: GR-24-0102), HEIC-Foto
+M 2022 012;Buchhaltung/Eingang/Fax/FAX_20220207_0832.tif;1;exakt: Rechnungsnummer ohne Bindestriche, Seite 1 im Fax-TIFF
+Müller Rohrbruch;Mails/Anhänge/Mai 2023/RE_2023-00588.pdf;1;name: Suche mit ü, Dokument schreibt durchgehend 'Mueller' (ASCII)
+Kaminsky Fensterbau;2024/Belege Jan-Apr/Dokument (4).pdf;1;name: Tippfehler y statt i, Firmenname nur im Logo + Fußzeile
+Petersen Winterdienst Mühlenstraße;Verschiedenes/Bildschirmfoto 2023-03-20 um 09.14.52.png;1;name: Firma + Leistung + Objekt, PNG-Bildschirmfoto
+Gebäudeversicherung Kastanienweg;2025/Versicherung/Beitragsrechnung 2025.pdf;1;beschreibend: Dokument sagt 'Wohngebäudeversicherung' (Teilwort eines Kompositums)
+Glasbruch Haustür;Scans unsortiert/Scan_00487.pdf;1;beschreibend: Scan-PDF, Dateiname Scan_00487 irreführend
+Abgasmessung 2022;Scans unsortiert/20221011_0915.pdf;1;beschreibend: Scan-PDF, Leistung + Jahr
+Wasserschaden Decke Am Hang;Handy Fotos/WhatsApp Image 2024-07-02 at 18.41.07.jpeg;1;beschreibend: WhatsApp-Foto ohne EXIF
+Dachrinne Musterstraße;Objekte/Musterstr. 12/Dach/Unbenannt 2.pdf;1;beschreibend: Dokument und Ordner schreiben nur 'Musterstr. 12', Dokument sagt 'Dachrinnen'
+Strom Lindenweg 2022;Scans unsortiert/scan0012.pdf;1;schwer: Scan-PDF auf dem Kopf (180°), Dokument sagt 'Allgemeinstrom' / 'Jahresabrechnung Strom 2022'
+Rückschnitt Kirschlorbeer;Scans unsortiert/Scan_2023-04-11.pdf;1;schwer: Scan mit unsichtbarer Müll-Textebene
+Türsprechanlage Lindenweg;Buchhaltung/Eingang/Scan_Stapel_März.pdf;2;schwer: Seite 2 im Sammel-PDF (gescannte Seite)
+Tankstelle Kanister;Kassenbons/scan0004.pdf;1;schwer: verblasster Thermo-Kassenbon als Scan-PDF

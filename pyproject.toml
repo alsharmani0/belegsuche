@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "belegsuche"
+version = "0.1.0"
+description = "Belege und Dokumente lokal auf dem Mac durchsuchen – mit Texterkennung für Scans."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "pypdfium2>=4.30",
+    "pillow>=10",
+    "rapidfuzz>=3",
+    "pyobjc-framework-Vision>=10; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=10; sys_platform == 'darwin'",
+]
+
+[project.urls]
+Homepage = "https://github.com/alsharmani0/belegsuche"
+Repository = "https://github.com/alsharmani0/belegsuche"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "reportlab>=4"]
+
+[project.scripts]
+belegsuche = "belegsuche.cli:main"
+
+[tool.setuptools]
+packages = ["belegsuche"]
+
+[tool.setuptools.package-data]
+belegsuche = ["ui.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "vision: braucht Apples Vision-Texterkennung (siehe tests/conftest.py)",
+]

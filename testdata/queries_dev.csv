@@ -1,0 +1,27 @@
+suche;datei;seite;notiz
+RE-2024-00031;2024/Belege Jan-Apr/20240109_Brandl.pdf;1;exakt: Rechnungsnummer mit - statt / (Dokument: RE-2024/00031)
+2408,92;2019/Handwerker/Rechnung.pdf;1;exakt: Gesamtbetrag ohne Tausenderpunkt und ohne € (Dokument: 2.408,92 €)
+INV88213;2020/Wartungsverträge/INV-88213.pdf;1;exakt: Rechnungsnummer ohne Bindestrich (Dokument: INV-88213)
+4711-22;2022/Handwerker/Rechnung_Vogt.pdf;1;exakt+dublette: Nr. 4711/22 mit - statt /. Byte-identische Kopien Buchhaltung/Erledigt/2022/4711_22.pdf und Mails/Anhänge/Rechnung 4711-22.pdf gelten ebenfalls als Treffer
+HM 10233;2021/Objekte/Musterstraße 12/Rechnungen/Unbenannt.pdf;1;exakt: Rechnungsnummer mit Leerzeichen statt Bindestrich (Dokument: HM-10233)
+1608.19;2019/Stadtwerke & Versorger/Abrechnung_2018.pdf;1;exakt: Betrag mit Dezimalpunkt statt Komma (Dokument: EUR 1.608,19)
+Schornsteinfger Kastanienweg;2018/Dokument (3).pdf;1;name: Tippfehler Schornsteinfeger + Objekt
+Mueller Gastherme;2019/Handwerker/20190312_1422.pdf;1;name: ue statt ü (Dokument: Haustechnik Müller GmbH, nur die E-Mail-Domain schreibt 'mueller')
+Weissenfels Mieterhöhung;Versicherung & Recht/Anwalt/Kostennote.pdf;1;name: ss statt ß (Dokument: Weißenfels & Partner, nur die E-Mail-Domain schreibt 'weissenfels')
+Sonleitner Balkontür;2023/Dokument (7).pdf;1;name: Tippfehler im Firmennamen (Sonnleitner)
+Kammerjäger Rieger;Mails/Anhänge/image001.png;1;name: Firmenname + Branchenwort aus dem Briefkopf, Beleg ist PNG (Mail-Inlinebild, ohne Text)
+Thermometrik Heizkosten;2022/Objekte/Birkenallee 21/Heizkosten 2021.pdf;1;name: Firma + Dokumentart (zwei Thermometrik-Belege, nur einer betrifft Heizkosten)
+Wartung Heizung Musterstraße;2021/Objekte/Musterstraße 12/Rechnungen/Rechnung (1).pdf;1;beschreibend: Dokument sagt 'Heizungswartung' und 'Musterstr. 12' (Kompositum + Abkürzung, Ordnername enthält aber 'Musterstraße 12')
+Hausmeister Lindenweg 2022;2022/Reinigung + Pflege/Rechnung Juli.pdf;1;beschreibend: Dokument sagt 'Hauswart', nicht 'Hausmeister'
+Treppenhaus streichen Lindenweg;2018/Belege/Unbenannt.pdf;1;beschreibend: Malerarbeiten 2018, Betreffzeile
+Nebenkosten Birkenallee 2019;2020/Rechnungen 2020/Stadtwerke Abrechnung 2019.pdf;1;beschreibend: Dokument heißt 'Betriebskostenabrechnung 2019' (Synonym Nebenkosten)
+Rauchmelder Lindenweg;Verschiedenes/alt/Unbenannt.pdf;1;beschreibend: Dokument sagt 'Rauchwarnmelder' (Kompositum-Variante)
+Wallbox Tiefgarage;2024/Handwerker/Rechnung (2).pdf;1;beschreibend: seltene Leistung, nichtssagender Dateiname
+Sturmschaden Dach Birkenallee;Buchhaltung/Eingang/Scans/scan0001.pdf;1;schwer: Scan-PDF ohne Textlayer, Seite um 90° gedreht
+Grundreinigung Kastanienweg;Buchhaltung/Eingang/Scans/scan0007.pdf;1;schwer: Scan mit unsichtbarer Müll-Textebene (kaputtes Scanner-OCR), Inhalt nur im Bild
+Thermostatventile Am Hang;Buchhaltung/Eingang/Scan_Stapel_März.pdf;4;schwer: Seite 4 im Sammel-PDF (gescannte Seite)
+Orion Rohrreinigung;2021/Dokument.pdf;1;schwer: Firmenname nur im Logo-Bild und in winziger Fußzeile
+Baumarkt Streusalz;Kassenbons/IMG_6093.jpg;1;schwer: verblasster Thermo-Kassenbon als Handyfoto (JPG)
+Winterdienst Musterstraße;Buchhaltung/Eingang/Fax/FAX_20220207_0832.tif;3;schwer: Seite 3 im mehrseitigen Fax-TIFF (1-bit, G4)
+Aufzug Türantrieb;Handy Fotos/IMG_5120.HEIC;1;schwer: HEIC-Handyfoto
+Schlüsseldienst Mühlenstraße;Handy Fotos/IMG_4402.jpg;1;schwer: Handyfoto-JPG mit EXIF-Orientierung 6 (Pixel liegen quer)

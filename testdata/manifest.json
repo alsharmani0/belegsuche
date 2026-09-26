@@ -1,0 +1,2080 @@
+{
+  "generator": "tools/make_testdata.py",
+  "seed": 20260924,
+  "korpus_root": "testdata/korpus",
+  "hinweis": "Alle Daten fiktiv. Pfade relativ zu korpus_root.",
+  "anzahl_dateien": 64,
+  "documents": [
+    {
+      "path": "2018/Belege/Unbenannt.pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "lindqvist_2018",
+          "firma": "Malerbetrieb Lindqvist",
+          "rechnungsnummer": "M-2018-031",
+          "datum": "2018-06-19",
+          "datum_text": "19. Juni 2018",
+          "gesamtbetrag": "3083.17",
+          "gesamtbetrag_text": "3.083,17 €",
+          "leistung": "Malerarbeiten Treppenhaus (Wände, Decken, Handlauf)",
+          "objektadresse": "Lindenweg 3, 12345 Musterstadt",
+          "objektadresse_normiert": "Lindenweg 3, 12345 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "9abec69c5c683978fa8941c27e0d3296af1a13788df7f1735f13398e905142de",
+      "size_bytes": 86327
+    },
+    {
+      "path": "2018/Dokument (3).pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [
+        "schreibmaschinenschrift"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "albrecht_2018",
+          "firma": "Schornsteinfegermeister Jens Albrecht",
+          "rechnungsnummer": "SF-2018-0347",
+          "datum": "2018-11-05",
+          "datum_text": "05.11.18",
+          "gesamtbetrag": "122.33",
+          "gesamtbetrag_text": "EUR 122,33",
+          "leistung": "Feuerstättenschau, Überprüfung Abgasanlage, Kehrung",
+          "objektadresse": "Kastanienweg 5a, 12349 Beispielhausen",
+          "objektadresse_normiert": "Kastanienweg 5a, 12349 Beispielhausen"
+        }
+      ],
+      "params": null,
+      "sha256": "166d438690eccdf9208833dd1a424aef05a9fae01cf07ff301960484da8e574d",
+      "size_bytes": 77372
+    },
+    {
+      "path": "2019/Handwerker/20190312_1422.pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "mueller_2019",
+          "firma": "Haustechnik Müller GmbH",
+          "rechnungsnummer": "2019-00312",
+          "datum": "2019-03-12",
+          "datum_text": "12.03.2019",
+          "gesamtbetrag": "345.58",
+          "gesamtbetrag_text": "345,58 €",
+          "leistung": "Wartung der Gastherme",
+          "objektadresse": "Lindenweg 3, 12345 Musterstadt",
+          "objektadresse_normiert": "Lindenweg 3, 12345 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "8592ebb1360b96812cad172ff3759ed0a0015b1d668b512b4d707f1dbbfb22b2",
+      "size_bytes": 111494
+    },
+    {
+      "path": "2019/Handwerker/Rechnung.pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "vogt_2019",
+          "firma": "Elektro Vogt GmbH & Co. KG",
+          "rechnungsnummer": "3318/19",
+          "datum": "2019-08-02",
+          "datum_text": "2. August 2019",
+          "gesamtbetrag": "2408.92",
+          "gesamtbetrag_text": "2.408,92 €",
+          "leistung": "Treppenhausbeleuchtung auf LED umgerüstet, Bewegungsmelder",
+          "objektadresse": "Birkenallee 21, 12345 Musterstadt",
+          "objektadresse_normiert": "Birkenallee 21, 12345 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "95695b599e1dabe81fdf033677141bec16078f1ecc4f520239d55ba2c177f32a",
+      "size_bytes": 111245
+    },
+    {
+      "path": "2019/Stadtwerke & Versorger/Abrechnung_2018.pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "stadtwerke_2019",
+          "firma": "Stadtwerke Musterstadt GmbH",
+          "rechnungsnummer": "3001192276",
+          "datum": "2019-01-23",
+          "datum_text": "23.01.2019",
+          "gesamtbetrag": "1608.19",
+          "gesamtbetrag_text": "EUR 1.608,19",
+          "leistung": "Jahresabrechnung Allgemeinstrom 2018",
+          "objektadresse": "Musterstraße 12, 12345 Musterstadt",
+          "objektadresse_normiert": "Musterstraße 12, 12345 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "866711980de0d08a613af533646236282d8df17af5c01554050843442cbe90aa",
+      "size_bytes": 67573
+    },
+    {
+      "path": "Versicherung & Recht/Nordlicht/Beitrag 2019.pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "nordlicht_2019",
+          "firma": "Nordlicht Versicherung AG",
+          "rechnungsnummer": "BR-2019-771903",
+          "datum": "2019-01-02",
+          "datum_text": "2. Januar 2019",
+          "gesamtbetrag": "1583.89",
+          "gesamtbetrag_text": "EUR 1.583,89",
+          "leistung": "Beitragsrechnung Wohngebäudeversicherung 2019",
+          "objektadresse": "Musterstraße 12, 12345 Musterstadt",
+          "objektadresse_normiert": "Musterstraße 12, 12345 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "c48e36c176733870205f13c20ce550624cb3d339906567399f675b2b58bf9654",
+      "size_bytes": 85999
+    },
+    {
+      "path": "2020/Rechnungen 2020/Stadtwerke Abrechnung 2019.pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [
+        "synonym_betriebskosten_nebenkosten"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "stadtwerke_2020_bk",
+          "firma": "Stadtwerke Musterstadt GmbH",
+          "rechnungsnummer": "BK-2019-00817",
+          "datum": "2020-04-20",
+          "datum_text": "20.04.2020",
+          "gesamtbetrag": "5419.03",
+          "gesamtbetrag_text": "5.419,03 €",
+          "leistung": "Betriebskostenabrechnung 2019 (Wasser, Abwasser, Müll, Straßenreinigung)",
+          "objektadresse": "Birkenallee 21, 12345 Musterstadt",
+          "objektadresse_normiert": "Birkenallee 21, 12345 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "262b7fb4e2d12d1b086e859946933fc9611b6001f38e7997f0e3def6b20aedc9",
+      "size_bytes": 67886
+    },
+    {
+      "path": "2020/Rechnungen 2020/Dokument (1).pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [
+        "hauswart_statt_hausmeister"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "krueger_2020",
+          "firma": "Hauswartservice Krüger",
+          "rechnungsnummer": "R2020 0388",
+          "datum": "2020-12-01",
+          "datum_text": "01.12.2020",
+          "gesamtbetrag": "259.00",
+          "gesamtbetrag_text": "259,00 €",
+          "leistung": "Hauswartdienste November 2020",
+          "objektadresse": "Am Hang 7, 12349 Beispielhausen",
+          "objektadresse_normiert": "Am Hang 7, 12349 Beispielhausen"
+        }
+      ],
+      "params": null,
+      "sha256": "6b007609c0e334ca5977aa5b23900a68fa3a0202783ed77b8b5267d1c6596f52",
+      "size_bytes": 86370
+    },
+    {
+      "path": "2020/Wartungsverträge/INV-88213.pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "kranich_2020",
+          "firma": "Kranich Aufzugtechnik GmbH",
+          "rechnungsnummer": "INV-88213",
+          "datum": "2020-07-15",
+          "datum_text": "15.07.2020",
+          "gesamtbetrag": "906.07",
+          "gesamtbetrag_text": "€ 906,07",
+          "leistung": "Wartung Personenaufzug 1. Halbjahr 2020",
+          "objektadresse": "Birkenallee 21, 12345 Musterstadt",
+          "objektadresse_normiert": "Birkenallee 21, 12345 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "a8d7444769fab4bb7034decf7ae0c45787f3129c93edc3281e6dfe3f79591e38",
+      "size_bytes": 66874
+    },
+    {
+      "path": "2021/Objekte/Musterstraße 12/Rechnungen/Rechnung (1).pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [
+        "abgekuerzte_strasse",
+        "kompositum_heizungswartung"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "brandl_2021",
+          "firma": "Wärmetechnik Brandl GmbH",
+          "rechnungsnummer": "RE-2021/00487",
+          "datum": "2021-03-12",
+          "datum_text": "12. März 2021",
+          "gesamtbetrag": "530.26",
+          "gesamtbetrag_text": "530,26 €",
+          "leistung": "Heizungswartung",
+          "objektadresse": "Musterstr. 12, 12345 Musterstadt",
+          "objektadresse_normiert": "Musterstraße 12, 12345 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "e792e84067ca715738a1b254d108cc34fb7547a7f2820bfaad6779fb38051904",
+      "size_bytes": 111269
+    },
+    {
+      "path": "2021/Objekte/Musterstraße 12/Rechnungen/Unbenannt.pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "petersen_2021",
+          "firma": "Hausmeisterdienst Petersen GmbH",
+          "rechnungsnummer": "HM-10233",
+          "datum": "2021-05-31",
+          "datum_text": "31.05.2021",
+          "gesamtbetrag": "412.34",
+          "gesamtbetrag_text": "412,34 €",
+          "leistung": "Hausmeisterleistungen Mai 2021",
+          "objektadresse": "Musterstraße 12, 12345 Musterstadt",
+          "objektadresse_normiert": "Musterstraße 12, 12345 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "f6e287c9ba56a34b129477a2e9a853885ec5be16bcdd1bbad3f3f902d4b66f69",
+      "size_bytes": 100720
+    },
+    {
+      "path": "2021/Objekte/Birkenallee 21/Garten 2021.pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "gruenwerk_2021",
+          "firma": "Grünwerk Gartenpflege Schulte",
+          "rechnungsnummer": "GW 2021/203",
+          "datum": "2021-11-30",
+          "datum_text": "30.11.2021",
+          "gesamtbetrag": "1520.82",
+          "gesamtbetrag_text": "1.520,82 €",
+          "leistung": "Gartenpflege Saison 2021 (Pflegevertrag)",
+          "objektadresse": "Birkenallee 21, 12345 Musterstadt",
+          "objektadresse_normiert": "Birkenallee 21, 12345 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "8701a9296063298f9dac2f17be0e75d747af08f7a7dc130553e2151dbc2add5c",
+      "size_bytes": 111094
+    },
+    {
+      "path": "2021/Dokument.pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [
+        "logo_only_company"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "orion_2021",
+          "firma": "ORION Rohr- und Kanalservice GmbH",
+          "rechnungsnummer": "OR-2021-1187",
+          "datum": "2021-09-08",
+          "datum_text": "08.09.2021",
+          "gesamtbetrag": "552.16",
+          "gesamtbetrag_text": "552,16 €",
+          "leistung": "Rohrreinigung Fallstrang Küche, Kamerabefahrung",
+          "objektadresse": "Mühlenstr. 40, 12347 Musterstadt",
+          "objektadresse_normiert": "Mühlenstraße 40, 12347 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "8f6fd42ca153ddc26153c2df9f1b7cb54f2f4f192c11df22e972f2b7b2ddaefe",
+      "size_bytes": 96625
+    },
+    {
+      "path": "Versicherung & Recht/Anwalt/Kostennote.pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [
+        "eszett_weissenfels"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "weissenfels_2021",
+          "firma": "Weißenfels & Partner Rechtsanwälte mbB",
+          "rechnungsnummer": "2021/0419",
+          "datum": "2021-06-29",
+          "datum_text": "29.06.2021",
+          "gesamtbetrag": "254.30",
+          "gesamtbetrag_text": "254,30 €",
+          "leistung": "Beratung und Mieterhöhungsverlangen (Kostennote RVG)",
+          "objektadresse": "Mieterhöhungsverlangen Wohnung 2. OG links, Lindenweg 3, 12345 Musterstadt",
+          "objektadresse_normiert": "Lindenweg 3, 12345 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "c942ec38047942ad29c50d0817da84fc7e70372080b7c2ec5e426100233f66f9",
+      "size_bytes": 86109
+    },
+    {
+      "path": "2022/Reinigung + Pflege/Rechnung Juli.pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [
+        "hauswart_statt_hausmeister"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "krueger_2022",
+          "firma": "Hauswartservice Krüger",
+          "rechnungsnummer": "R2022 0415",
+          "datum": "2022-07-04",
+          "datum_text": "4. Juli 2022",
+          "gesamtbetrag": "617.00",
+          "gesamtbetrag_text": "617,00 €",
+          "leistung": "Hauswarttätigkeit 2. Quartal 2022",
+          "objektadresse": "Lindenweg 3, 12345 Musterstadt",
+          "objektadresse_normiert": "Lindenweg 3, 12345 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "31248f7f6435b9fc7d7109b17014265ef42237e16a8ffd105c2bba5ff73d55d9",
+      "size_bytes": 86412
+    },
+    {
+      "path": "2022/Handwerker/Rechnung_Vogt.pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "vogt_2022",
+          "firma": "Elektro Vogt GmbH & Co. KG",
+          "rechnungsnummer": "4711/22",
+          "datum": "2022-05-17",
+          "datum_text": "17.05.2022",
+          "gesamtbetrag": "613.92",
+          "gesamtbetrag_text": "613,92 €",
+          "leistung": "E-Check und Austausch Klingeltableau",
+          "objektadresse": "Am Hang 7, 12349 Beispielhausen",
+          "objektadresse_normiert": "Am Hang 7, 12349 Beispielhausen"
+        }
+      ],
+      "params": null,
+      "sha256": "4a27a06ffaad97fa138959c5d28475de97ae353f3cfe16c0d61375da2a0edb52",
+      "size_bytes": 111037
+    },
+    {
+      "path": "2022/Objekte/Birkenallee 21/Heizkosten 2021.pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "thermometrik_2022",
+          "firma": "Thermometrik Messdienst GmbH",
+          "rechnungsnummer": "7719-2022-0043",
+          "datum": "2022-06-10",
+          "datum_text": "10.06.2022",
+          "gesamtbetrag": "796.11",
+          "gesamtbetrag_text": "796,11 €",
+          "leistung": "Heizkosten- und Warmwasserabrechnung 2021, Gerätemiete",
+          "objektadresse": "Birkenallee 21, 12345 Musterstadt",
+          "objektadresse_normiert": "Birkenallee 21, 12345 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "858499a5ed61e9838c3feefe004838f7e3052023a5bc40a111bf5bf9293762f4",
+      "size_bytes": 67054
+    },
+    {
+      "path": "Versicherung & Recht/Nordlicht/Dokument (2).pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "nordlicht_2022",
+          "firma": "Nordlicht Versicherung AG",
+          "rechnungsnummer": "BR-2022-803317",
+          "datum": "2022-01-03",
+          "datum_text": "3. Januar 2022",
+          "gesamtbetrag": "1647.56",
+          "gesamtbetrag_text": "EUR 1.647,56",
+          "leistung": "Beitragsrechnung Wohngebäudeversicherung 2022",
+          "objektadresse": "Lindenweg 3, 12345 Musterstadt",
+          "objektadresse_normiert": "Lindenweg 3, 12345 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "66abd69461b4772c45cb2e1a39998b198660cab21c9b5fd40d94f981c76c2e44",
+      "size_bytes": 85644
+    },
+    {
+      "path": "Mails/Anhänge/Mai 2023/RE_2023-00588.pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [
+        "ascii_umlaute_mueller"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "mueller_2023",
+          "firma": "Haustechnik Mueller GmbH",
+          "rechnungsnummer": "2023-00588",
+          "datum": "2023-05-14",
+          "datum_text": "14.05.2023",
+          "gesamtbetrag": "762.67",
+          "gesamtbetrag_text": "762,67 EUR",
+          "leistung": "Rohrbruch Notdienst Keller, Kupferleitung ersetzt",
+          "objektadresse": "Lindenweg 3, 12345 Musterstadt",
+          "objektadresse_normiert": "Lindenweg 3, 12345 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "318b7c799855f29ff27083e49552997b9d0a9be962ad653c9ef96198bdf1d414",
+      "size_bytes": 109363
+    },
+    {
+      "path": "2023/Q1/Rechnung (3).pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "glanzwerk_2023",
+          "firma": "Glanzwerk Gebäudereinigung GmbH",
+          "rechnungsnummer": "GR-23-0311",
+          "datum": "2023-03-31",
+          "datum_text": "31.03.2023",
+          "gesamtbetrag": "294.53",
+          "gesamtbetrag_text": "294,53 €",
+          "leistung": "Treppenhausreinigung März 2023",
+          "objektadresse": "Lindenweg 3, 12345 Musterstadt",
+          "objektadresse_normiert": "Lindenweg 3, 12345 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "8791a58742bdc5296feb8ce5f840d96f5f22b4f7bf33c85b0b37f38a240859e6",
+      "size_bytes": 110584
+    },
+    {
+      "path": "2023/Dokument (7).pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "sonnleitner_2023",
+          "firma": "Glaserei Sonnleitner",
+          "rechnungsnummer": "20231114-1",
+          "datum": "2023-11-14",
+          "datum_text": "14.11.2023",
+          "gesamtbetrag": "486.59",
+          "gesamtbetrag_text": "486,59 €",
+          "leistung": "Isolierglasscheibe Balkontür ersetzt",
+          "objektadresse": "Birkenallee 21, 12345 Musterstadt",
+          "objektadresse_normiert": "Birkenallee 21, 12345 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "6102fb8757112ebd3a3708764e3b8e7c95bc443eafa4b809f9b5c2e94ec43c14",
+      "size_bytes": 111307
+    },
+    {
+      "path": "2024/Belege Jan-Apr/20240109_Brandl.pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "brandl_2024",
+          "firma": "Wärmetechnik Brandl GmbH",
+          "rechnungsnummer": "RE-2024/00031",
+          "datum": "2024-01-09",
+          "datum_text": "09.01.2024",
+          "gesamtbetrag": "874.65",
+          "gesamtbetrag_text": "874,65 €",
+          "leistung": "Notdienst Heizungsausfall, Umwälzpumpe getauscht",
+          "objektadresse": "Kastanienweg 5a, 12349 Beispielhausen",
+          "objektadresse_normiert": "Kastanienweg 5a, 12349 Beispielhausen"
+        }
+      ],
+      "params": null,
+      "sha256": "4f5cde125023a6a88951fb14c791c85ffca836d3787d19a2e84c9354b62beab4",
+      "size_bytes": 111130
+    },
+    {
+      "path": "2024/Belege Jan-Apr/Dokument (4).pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [
+        "logo_only_company"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "kaminski_2024",
+          "firma": "Fensterbau Kaminski GmbH",
+          "rechnungsnummer": "FK/24/0062",
+          "datum": "2024-04-16",
+          "datum_text": "16.04.2024",
+          "gesamtbetrag": "1167.39",
+          "gesamtbetrag_text": "1.167,39 €",
+          "leistung": "Austausch Kellerfenster",
+          "objektadresse": "Kastanienweg 5a, 12349 Beispielhausen",
+          "objektadresse_normiert": "Kastanienweg 5a, 12349 Beispielhausen"
+        }
+      ],
+      "params": null,
+      "sha256": "6c38a08a034316da807f211116f2852371855d4c27d37c49a404f99b7a56ae2b",
+      "size_bytes": 99423
+    },
+    {
+      "path": "2024/Handwerker/Rechnung (2).pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "vogt_2024",
+          "firma": "Elektro Vogt GmbH & Co. KG",
+          "rechnungsnummer": "0932/24",
+          "datum": "2024-08-21",
+          "datum_text": "21.08.2024",
+          "gesamtbetrag": "2377.86",
+          "gesamtbetrag_text": "2377,86",
+          "leistung": "Wallbox-Installation Tiefgarage",
+          "objektadresse": "Mühlenstraße 40 (Tiefgarage, Stellplatz 7)",
+          "objektadresse_normiert": "Mühlenstraße 40, 12347 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "d17a80ab606677f91bbc022c18f433d22c4e2c53dc6a5d1fa3589ac73f9b5e26",
+      "size_bytes": 111628
+    },
+    {
+      "path": "Objekte/Musterstr. 12/Dach/Unbenannt 2.pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [
+        "abgekuerzte_strasse"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "hoffmannbeck_2024",
+          "firma": "Dachdeckerei Hoffmann & Beck GbR",
+          "rechnungsnummer": "RE 24-2210",
+          "datum": "2024-11-05",
+          "datum_text": "05.11.2024",
+          "gesamtbetrag": "637.36",
+          "gesamtbetrag_text": "637,36 €",
+          "leistung": "Dachrinnenreinigung, Kontrolle Dachfläche",
+          "objektadresse": "Musterstr. 12, 12345 Musterstadt",
+          "objektadresse_normiert": "Musterstraße 12, 12345 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "9e21583d316a7ac2a18060c66de70bcf6bdf723608b91f36e8a511f207f3f005",
+      "size_bytes": 85689
+    },
+    {
+      "path": "Verschiedenes/alt/Unbenannt.pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [
+        "kompositum_rauchwarnmelder"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "thermometrik_2024",
+          "firma": "Thermometrik Messdienst GmbH",
+          "rechnungsnummer": "7719-2024-0112",
+          "datum": "2024-03-05",
+          "datum_text": "05.03.2024",
+          "gesamtbetrag": "281.44",
+          "gesamtbetrag_text": "281,44 €",
+          "leistung": "Rauchwarnmelder Wartung 2024",
+          "objektadresse": "Lindenweg 3, 12345 Musterstadt",
+          "objektadresse_normiert": "Lindenweg 3, 12345 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "d4458b8112aa100d0e8bc383275bd773f2c05431e833876ed2e3b49d47c79965",
+      "size_bytes": 66932
+    },
+    {
+      "path": "2025/Offene Posten/Abrechnung.pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "stadtwerke_2025_bk",
+          "firma": "Stadtwerke Musterstadt GmbH",
+          "rechnungsnummer": "BK-2024-01394",
+          "datum": "2025-03-18",
+          "datum_text": "18.03.2025",
+          "gesamtbetrag": "5869.06",
+          "gesamtbetrag_text": "5.869,06 €",
+          "leistung": "Betriebskostenabrechnung 2024 (Wasser, Abwasser, Abfall)",
+          "objektadresse": "Mühlenstraße 40, 12347 Musterstadt",
+          "objektadresse_normiert": "Mühlenstraße 40, 12347 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "13e91dc3a7cfc8e92e2b787ca71c944024a1ccbfd621fbe069b36761142ea112",
+      "size_bytes": 68214
+    },
+    {
+      "path": "2025/Versicherung/Beitragsrechnung 2025.pdf",
+      "kind": "digital_pdf",
+      "pages": 1,
+      "tags": [
+        "kompositum_wohngebaeudeversicherung"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "nordlicht_2025",
+          "firma": "Nordlicht Versicherung AG",
+          "rechnungsnummer": "BR-2025-846120",
+          "datum": "2025-01-02",
+          "datum_text": "2. Januar 2025",
+          "gesamtbetrag": "1892.10",
+          "gesamtbetrag_text": "EUR 1.892,10",
+          "leistung": "Beitragsrechnung Wohngebäudeversicherung 2025",
+          "objektadresse": "Kastanienweg 5a, 12349 Beispielhausen",
+          "objektadresse_normiert": "Kastanienweg 5a, 12349 Beispielhausen"
+        }
+      ],
+      "params": null,
+      "sha256": "c478b18360f9c49ff272267b4a1806c453c105d2ea1d7f797742dd0e6ba64ed7",
+      "size_bytes": 85659
+    },
+    {
+      "path": "2018/Belege/scan0001.pdf",
+      "kind": "scan_pdf",
+      "pages": 1,
+      "tags": [],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "nur_bild",
+          "doc_id": "stadtwerke_2018",
+          "firma": "Stadtwerke Musterstadt GmbH",
+          "rechnungsnummer": "3001185539",
+          "datum": "2018-02-14",
+          "datum_text": "14.02.2018",
+          "gesamtbetrag": "1011.58",
+          "gesamtbetrag_text": "1.011,58 €",
+          "leistung": "Jahresabrechnung Wasser/Abwasser 2017",
+          "objektadresse": "Am Hang 7, 12349 Beispielhausen",
+          "objektadresse_normiert": "Am Hang 7, 12349 Beispielhausen"
+        }
+      ],
+      "params": {
+        "dpi": 150,
+        "skew": 2.36,
+        "blur": 0.63,
+        "noise": 10.6,
+        "paper": 220,
+        "ink": 54,
+        "jpeg_q": 36,
+        "holes": true,
+        "edge": false,
+        "rotate": 0
+      },
+      "sha256": "b210362e2d4d09879eb344cbf7a323818d2ded26d4efafb354cfb8cfbd53e3d3",
+      "size_bytes": 236241
+    },
+    {
+      "path": "2019/Handwerker/scan0005.pdf",
+      "kind": "scan_pdf",
+      "pages": 1,
+      "tags": [],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "nur_bild",
+          "doc_id": "petersen_2019",
+          "firma": "Hausmeisterdienst Petersen GmbH",
+          "rechnungsnummer": "HM-9021",
+          "datum": "2019-04-02",
+          "datum_text": "02.04.2019",
+          "gesamtbetrag": "794.33",
+          "gesamtbetrag_text": "794,33 €",
+          "leistung": "Hausmeisterleistungen 1. Quartal 2019",
+          "objektadresse": "Birkenallee 21, 12345 Musterstadt",
+          "objektadresse_normiert": "Birkenallee 21, 12345 Musterstadt"
+        }
+      ],
+      "params": {
+        "dpi": 200,
+        "skew": 2.09,
+        "blur": 0.87,
+        "noise": 6.5,
+        "paper": 232,
+        "ink": 50,
+        "jpeg_q": 37,
+        "holes": false,
+        "edge": true,
+        "rotate": 0
+      },
+      "sha256": "30f919b64b38e8bba339458599d25bdec7bac394881185cb9caa6c957bb8c4b5",
+      "size_bytes": 248946
+    },
+    {
+      "path": "Verschiedenes/alt/neu/Dokument (3).pdf",
+      "kind": "scan_pdf",
+      "pages": 1,
+      "tags": [],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "nur_bild",
+          "doc_id": "mueller_2020",
+          "firma": "Haustechnik Müller GmbH",
+          "rechnungsnummer": "2020-00107",
+          "datum": "2020-02-11",
+          "datum_text": "11.02.2020",
+          "gesamtbetrag": "2940.49",
+          "gesamtbetrag_text": "2940,49",
+          "leistung": "Austausch Warmwasserspeicher 300 l",
+          "objektadresse": "Mühlenstraße 40, 12347 Musterstadt",
+          "objektadresse_normiert": "Mühlenstraße 40, 12347 Musterstadt"
+        }
+      ],
+      "params": {
+        "dpi": 150,
+        "skew": -2.35,
+        "blur": 0.61,
+        "noise": 9.1,
+        "paper": 217,
+        "ink": 58,
+        "jpeg_q": 32,
+        "holes": false,
+        "edge": true,
+        "rotate": 0
+      },
+      "sha256": "4980f28bb6bd87596b5ec386432be457aca2f3a1790553187486ec39fe25feb9",
+      "size_bytes": 184147
+    },
+    {
+      "path": "Scans unsortiert/Scan_00487.pdf",
+      "kind": "scan_pdf",
+      "pages": 1,
+      "tags": [
+        "dateiname_irrefuehrend"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "nur_bild",
+          "doc_id": "sonnleitner_2020",
+          "firma": "Glaserei Sonnleitner",
+          "rechnungsnummer": "20200917-3",
+          "datum": "2020-09-17",
+          "datum_text": "17.09.2020",
+          "gesamtbetrag": "413.64",
+          "gesamtbetrag_text": "413,64 €",
+          "leistung": "Glasbruch Haustür, Verbundsicherheitsglas ersetzt",
+          "objektadresse": "Mühlenstr. 40, 12347 Musterstadt",
+          "objektadresse_normiert": "Mühlenstraße 40, 12347 Musterstadt"
+        }
+      ],
+      "params": {
+        "dpi": 200,
+        "skew": -2.02,
+        "blur": 0.71,
+        "noise": 7.0,
+        "paper": 228,
+        "ink": 56,
+        "jpeg_q": 33,
+        "holes": true,
+        "edge": false,
+        "rotate": 0
+      },
+      "sha256": "6833d6d3547f59df4c011d4db8a6b85aa0a3edca726f6eb0b1ef2fc2fe13413d",
+      "size_bytes": 242809
+    },
+    {
+      "path": "Buchhaltung/Eingang/Scans/scan0003.pdf",
+      "kind": "scan_pdf",
+      "pages": 1,
+      "tags": [],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "nur_bild",
+          "doc_id": "glanzwerk_2020",
+          "firma": "Glanzwerk Gebäudereinigung GmbH",
+          "rechnungsnummer": "GR-20-0781",
+          "datum": "2020-10-05",
+          "datum_text": "05.10.2020",
+          "gesamtbetrag": "813.37",
+          "gesamtbetrag_text": "813,37 €",
+          "leistung": "Treppenhausreinigung 3. Quartal 2020",
+          "objektadresse": "Musterstraße 12, 12345 Musterstadt",
+          "objektadresse_normiert": "Musterstraße 12, 12345 Musterstadt"
+        }
+      ],
+      "params": {
+        "dpi": 200,
+        "skew": -1.89,
+        "blur": 0.63,
+        "noise": 8.3,
+        "paper": 234,
+        "ink": 51,
+        "jpeg_q": 32,
+        "holes": false,
+        "edge": true,
+        "rotate": 0
+      },
+      "sha256": "1aafc4226f1c64f0956773dc266f27a7a9e3abb5ea51c5b4cc8f665aafafcd4e",
+      "size_bytes": 288349
+    },
+    {
+      "path": "Buchhaltung/Eingang/Scans/scan0001.pdf",
+      "kind": "scan_pdf",
+      "pages": 1,
+      "tags": [
+        "rotated_90"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "nur_bild",
+          "doc_id": "hoffmannbeck_2021",
+          "firma": "Dachdeckerei Hoffmann & Beck GbR",
+          "rechnungsnummer": "RE 21-1093",
+          "datum": "2021-02-22",
+          "datum_text": "22.02.2021",
+          "gesamtbetrag": "1454.66",
+          "gesamtbetrag_text": "1.454,66 €",
+          "leistung": "Sturmschaden Dach: Dachziegel ersetzt, First neu vermörtelt",
+          "objektadresse": "Birkenallee 21, 12345 Musterstadt",
+          "objektadresse_normiert": "Birkenallee 21, 12345 Musterstadt"
+        }
+      ],
+      "params": {
+        "dpi": 200,
+        "skew": 1.69,
+        "blur": 0.68,
+        "noise": 7.2,
+        "paper": 234,
+        "ink": 46,
+        "jpeg_q": 38,
+        "holes": false,
+        "edge": false,
+        "rotate": 90
+      },
+      "sha256": "9ba913e19cf511c7f2f3ee774537b5ae0b3370141e3e249229067d4106bf17d3",
+      "size_bytes": 291673
+    },
+    {
+      "path": "Buchhaltung/Eingang/Scans/scan0009.pdf",
+      "kind": "scan_pdf",
+      "pages": 1,
+      "tags": [
+        "thermal_receipt",
+        "kassenbon"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "nur_bild",
+          "doc_id": "bauwelt_2021",
+          "firma": "BAUWELT Baumarkt Musterstadt",
+          "rechnungsnummer": "Bon-Nr. 2093",
+          "datum": "2021-04-10",
+          "datum_text": "10.04.2021",
+          "gesamtbetrag": "112.10",
+          "gesamtbetrag_text": "112,10",
+          "leistung": "Kassenbon Baumarkt: Wandfarbe, Abdeckfolie, Malerkrepp, Farbrollen-Set",
+          "objektadresse": null,
+          "objektadresse_normiert": null
+        }
+      ],
+      "params": {
+        "dpi": 200,
+        "skew": 1.24,
+        "blur": 0.83,
+        "noise": 5.8,
+        "paper": 241,
+        "ink": 162,
+        "jpeg_q": 40,
+        "holes": false,
+        "edge": false,
+        "fade": 101,
+        "rotate": 0
+      },
+      "sha256": "8d15ae0deb7884ddf3db4e707d3c48e84190a96e9480fc5be7fa3fdbe672ff0b",
+      "size_bytes": 101122
+    },
+    {
+      "path": "Scans unsortiert/20221011_0915.pdf",
+      "kind": "scan_pdf",
+      "pages": 1,
+      "tags": [
+        "schreibmaschinenschrift"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "nur_bild",
+          "doc_id": "albrecht_2022",
+          "firma": "Schornsteinfegermeister Jens Albrecht",
+          "rechnungsnummer": "SF-2022-1162",
+          "datum": "2022-10-11",
+          "datum_text": "11.10.22",
+          "gesamtbetrag": "153.39",
+          "gesamtbetrag_text": "EUR 153,39",
+          "leistung": "Abgasmessung (Emissionsmessung), Feuerstättenschau",
+          "objektadresse": "Musterstraße 12, 12345 Musterstadt",
+          "objektadresse_normiert": "Musterstraße 12, 12345 Musterstadt"
+        }
+      ],
+      "params": {
+        "dpi": 200,
+        "skew": 2.12,
+        "blur": 0.66,
+        "noise": 8.1,
+        "paper": 227,
+        "ink": 52,
+        "jpeg_q": 39,
+        "holes": false,
+        "edge": false,
+        "rotate": 0
+      },
+      "sha256": "2e714fe32b15a35fdaa4a725b5225f8b3e327b395ece66db14f90ba50a5cfb60",
+      "size_bytes": 334708
+    },
+    {
+      "path": "2023/Wartungsverträge/scan0002.pdf",
+      "kind": "scan_pdf",
+      "pages": 1,
+      "tags": [
+        "kompositum_brennwertkessel_inspektion"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "nur_bild",
+          "doc_id": "brandl_2023",
+          "firma": "Wärmetechnik Brandl GmbH",
+          "rechnungsnummer": "RE-2023/01122",
+          "datum": "2023-09-26",
+          "datum_text": "26.09.2023",
+          "gesamtbetrag": "618.09",
+          "gesamtbetrag_text": "618,09 €",
+          "leistung": "Brennwertkessel-Inspektion",
+          "objektadresse": "Birkenallee 21, 12345 Musterstadt",
+          "objektadresse_normiert": "Birkenallee 21, 12345 Musterstadt"
+        }
+      ],
+      "params": {
+        "dpi": 200,
+        "skew": -1.58,
+        "blur": 0.9,
+        "noise": 6.4,
+        "paper": 234,
+        "ink": 39,
+        "jpeg_q": 36,
+        "holes": false,
+        "edge": false,
+        "rotate": 0
+      },
+      "sha256": "df90a4517804e6315f920108abb615054424ee2e9d5670ac01270e7c9d0c980a",
+      "size_bytes": 247223
+    },
+    {
+      "path": "Scans unsortiert/scan0012.pdf",
+      "kind": "scan_pdf",
+      "pages": 1,
+      "tags": [
+        "rotated_180"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "nur_bild",
+          "doc_id": "stadtwerke_2023",
+          "firma": "Stadtwerke Musterstadt GmbH",
+          "rechnungsnummer": "3001230145",
+          "datum": "2023-02-01",
+          "datum_text": "01.02.2023",
+          "gesamtbetrag": "1548.71",
+          "gesamtbetrag_text": "1.548,71 €",
+          "leistung": "Jahresabrechnung Allgemeinstrom 2022",
+          "objektadresse": "Lindenweg 3, 12345 Musterstadt",
+          "objektadresse_normiert": "Lindenweg 3, 12345 Musterstadt"
+        }
+      ],
+      "params": {
+        "dpi": 150,
+        "skew": -2.77,
+        "blur": 0.57,
+        "noise": 8.8,
+        "paper": 209,
+        "ink": 64,
+        "jpeg_q": 40,
+        "holes": false,
+        "edge": true,
+        "rotate": 180
+      },
+      "sha256": "e756d9bf06ffc70ecc718cc83cbfe712453253fa7a6e3449b13d3499c72c7c0a",
+      "size_bytes": 208229
+    },
+    {
+      "path": "Kassenbons/scan0004.pdf",
+      "kind": "scan_pdf",
+      "pages": 1,
+      "tags": [
+        "thermal_receipt",
+        "kassenbon"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "nur_bild",
+          "doc_id": "brueckner_2024",
+          "firma": "Freie Tankstelle Brückner",
+          "rechnungsnummer": "Bon-Nr. 0082741",
+          "datum": "2024-06-08",
+          "datum_text": "08.06.2024",
+          "gesamtbetrag": "43.71",
+          "gesamtbetrag_text": "43,71",
+          "leistung": "Tankstellenbeleg: Super E10 für Rasenmäher, Kanister, 2-Takt-Öl",
+          "objektadresse": null,
+          "objektadresse_normiert": null
+        }
+      ],
+      "params": {
+        "dpi": 200,
+        "skew": -2.46,
+        "blur": 0.89,
+        "noise": 5.6,
+        "paper": 238,
+        "ink": 148,
+        "jpeg_q": 43,
+        "holes": false,
+        "edge": false,
+        "fade": 87,
+        "rotate": 0
+      },
+      "sha256": "503310855f82816ebde4b0cf653fe2484f6f396f8ce13a4f9bbd789125358579",
+      "size_bytes": 102159
+    },
+    {
+      "path": "2025/Offene Posten/scan0001.pdf",
+      "kind": "scan_pdf",
+      "pages": 1,
+      "tags": [
+        "hauswart_statt_hausmeister"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "nur_bild",
+          "doc_id": "krueger_2025",
+          "firma": "Hauswartservice Krüger",
+          "rechnungsnummer": "R2025 0027",
+          "datum": "2025-01-31",
+          "datum_text": "31.01.2025",
+          "gesamtbetrag": "375.00",
+          "gesamtbetrag_text": "375,00 €",
+          "leistung": "Hauswart Januar 2025, Sperrmüll entsorgt",
+          "objektadresse": "Kastanienweg 5a, 12349 Beispielhausen",
+          "objektadresse_normiert": "Kastanienweg 5a, 12349 Beispielhausen"
+        }
+      ],
+      "params": {
+        "dpi": 200,
+        "skew": -2.28,
+        "blur": 0.73,
+        "noise": 8.7,
+        "paper": 227,
+        "ink": 54,
+        "jpeg_q": 38,
+        "holes": false,
+        "edge": true,
+        "rotate": 0
+      },
+      "sha256": "dd5122353b276ca1fecdb19e84b924efe71670125b6b18cf1d0b8e7dcdfde085",
+      "size_bytes": 346738
+    },
+    {
+      "path": "Handy Fotos/IMG_2231.JPG",
+      "kind": "photo_jpg",
+      "pages": 1,
+      "tags": [],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "nur_bild",
+          "doc_id": "gruenwerk_2019",
+          "firma": "Grünwerk Gartenpflege Schulte",
+          "rechnungsnummer": "GW 2019/118",
+          "datum": "2019-10-28",
+          "datum_text": "28.10.2019",
+          "gesamtbetrag": "789.92",
+          "gesamtbetrag_text": "789,92 €",
+          "leistung": "Herbstschnitt Hecken, Laubbeseitigung",
+          "objektadresse": "Am Hang 7, 12349 Beispielhausen",
+          "objektadresse_normiert": "Am Hang 7, 12349 Beispielhausen"
+        }
+      ],
+      "params": {
+        "out": [
+          1512,
+          2016
+        ],
+        "quality": 85,
+        "exif_orientation": null,
+        "bg": "wood"
+      },
+      "sha256": "19ebf6d863e53a4022f554a2cea6fdc54c453a86cdbae146136e6eac6487f7d4",
+      "size_bytes": 559566
+    },
+    {
+      "path": "Handy Fotos/IMG_4402.jpg",
+      "kind": "photo_jpg",
+      "pages": 1,
+      "tags": [
+        "exif_orientation_6"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "nur_bild",
+          "doc_id": "yilmaz_2021",
+          "firma": "Schlüsseldienst Yilmaz",
+          "rechnungsnummer": "Q-211224-01",
+          "datum": "2021-12-24",
+          "datum_text": "24.12.2021",
+          "gesamtbetrag": "268.94",
+          "gesamtbetrag_text": "268,94 €",
+          "leistung": "Türöffnung Wohnungstür (Notdienst), Schließzylinder ersetzt",
+          "objektadresse": "Mühlenstraße 40, 1. OG rechts",
+          "objektadresse_normiert": "Mühlenstraße 40, 12347 Musterstadt"
+        }
+      ],
+      "params": {
+        "out": [
+          1512,
+          2016
+        ],
+        "quality": 85,
+        "exif_orientation": 6,
+        "bg": "desk"
+      },
+      "sha256": "e40d5870910c177f6187d6fb9ee68a07bb7de33a89019464c4d262ad5a22b044",
+      "size_bytes": 538539
+    },
+    {
+      "path": "Kassenbons/IMG_6093.jpg",
+      "kind": "photo_jpg",
+      "pages": 1,
+      "tags": [
+        "thermal_receipt",
+        "kassenbon"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "nur_bild",
+          "doc_id": "bauwelt_2023",
+          "firma": "BAUWELT Baumarkt Musterstadt",
+          "rechnungsnummer": "Bon-Nr. 4417",
+          "datum": "2023-01-19",
+          "datum_text": "19.01.2023",
+          "gesamtbetrag": "87.92",
+          "gesamtbetrag_text": "87,92",
+          "leistung": "Kassenbon Baumarkt: Silikon, Kartuschenpistole, Streusalz, Schneeschieber, Schrauben",
+          "objektadresse": null,
+          "objektadresse_normiert": null
+        }
+      ],
+      "params": {
+        "out": [
+          1512,
+          2016
+        ],
+        "quality": 85,
+        "exif_orientation": null,
+        "bg": "desk",
+        "fill": 0.86,
+        "blur": 0.9
+      },
+      "sha256": "32d013c77df38dd44983baf93b55157d1f058c657b70bb0ede55668f2c6a2437",
+      "size_bytes": 523359
+    },
+    {
+      "path": "Handy Fotos/WhatsApp Image 2024-07-02 at 18.41.07.jpeg",
+      "kind": "photo_jpg",
+      "pages": 1,
+      "tags": [
+        "whatsapp_ohne_exif"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "nur_bild",
+          "doc_id": "lindqvist_2024",
+          "firma": "Malerbetrieb Lindqvist",
+          "rechnungsnummer": "M-2024-077",
+          "datum": "2024-07-01",
+          "datum_text": "1. Juli 2024",
+          "gesamtbetrag": "788.26",
+          "gesamtbetrag_text": "788,26 €",
+          "leistung": "Beseitigung Wasserschaden Decke Küche",
+          "objektadresse": "Am Hang 7, 12349 Beispielhausen",
+          "objektadresse_normiert": "Am Hang 7, 12349 Beispielhausen"
+        }
+      ],
+      "params": {
+        "out": [
+          1200,
+          1600
+        ],
+        "quality": 72,
+        "exif_orientation": null,
+        "bg": "light"
+      },
+      "sha256": "e2ef6ca7191cea363f7ae9fe2608053de1596ca655bca0ce41465682708ec1b1",
+      "size_bytes": 191690
+    },
+    {
+      "path": "Mails/Anhänge/image001.png",
+      "kind": "png",
+      "pages": 1,
+      "tags": [],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "nur_bild",
+          "doc_id": "rieger_2022",
+          "firma": "Schädlingsbekämpfung Rieger",
+          "rechnungsnummer": "SB-5521",
+          "datum": "2022-08-23",
+          "datum_text": "23.08.2022",
+          "gesamtbetrag": "383.18",
+          "gesamtbetrag_text": "383,18 €",
+          "leistung": "Rattenbekämpfung Hof und Mülltonnenplatz",
+          "objektadresse": "Musterstraße 12, 12345 Musterstadt",
+          "objektadresse_normiert": "Musterstraße 12, 12345 Musterstadt"
+        }
+      ],
+      "params": {
+        "dpi": 150,
+        "skew": -2.23,
+        "blur": 0.71,
+        "noise": 6.0,
+        "paper": 240,
+        "ink": 46,
+        "jpeg_q": 37,
+        "holes": false,
+        "edge": false
+      },
+      "sha256": "2883e5817357bd8d244efc45fae2a078e7b778337e3577bb1def91d41f245057",
+      "size_bytes": 673233
+    },
+    {
+      "path": "Verschiedenes/Bildschirmfoto 2023-03-20 um 09.14.52.png",
+      "kind": "png",
+      "pages": 1,
+      "tags": [
+        "bildschirmfoto"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "nur_bild",
+          "doc_id": "petersen_2023",
+          "firma": "Hausmeisterdienst Petersen GmbH",
+          "rechnungsnummer": "HM-10871",
+          "datum": "2023-03-15",
+          "datum_text": "15.03.2023",
+          "gesamtbetrag": "799.20",
+          "gesamtbetrag_text": "799,20 €",
+          "leistung": "Winterdienst Saison 2022/23",
+          "objektadresse": "Mühlenstraße 40, 12347 Musterstadt",
+          "objektadresse_normiert": "Mühlenstraße 40, 12347 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "ae7c598fc2ce1edc19d59db876c8fb2d7e7763192dc6aa09f291c8c5219ee4b9",
+      "size_bytes": 117559
+    },
+    {
+      "path": "Handy Fotos/IMG_5120.HEIC",
+      "kind": "heic",
+      "pages": 1,
+      "tags": [],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "nur_bild",
+          "doc_id": "kranich_2023",
+          "firma": "Kranich Aufzugtechnik GmbH",
+          "rechnungsnummer": "INV-91540",
+          "datum": "2023-02-08",
+          "datum_text": "08.02.2023",
+          "gesamtbetrag": "2146.76",
+          "gesamtbetrag_text": "€ 2.146,76",
+          "leistung": "Reparatur Türantrieb Aufzug",
+          "objektadresse": "Birkenallee 21, 12345 Musterstadt",
+          "objektadresse_normiert": "Birkenallee 21, 12345 Musterstadt"
+        }
+      ],
+      "params": {
+        "out": [
+          1512,
+          2016
+        ],
+        "quality": 85,
+        "exif_orientation": null,
+        "bg": "wood"
+      },
+      "sha256": "9ed24bb1fcd0dd6b9c0b0214e916e2ad93fe4c2705c1281b89fe65381cff3c38",
+      "size_bytes": 498986
+    },
+    {
+      "path": "Handy Fotos/IMG_7731.HEIC",
+      "kind": "heic",
+      "pages": 1,
+      "tags": [],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "nur_bild",
+          "doc_id": "glanzwerk_2024",
+          "firma": "Glanzwerk Gebäudereinigung GmbH",
+          "rechnungsnummer": "GR-24-0102",
+          "datum": "2024-02-05",
+          "datum_text": "05.02.2024",
+          "gesamtbetrag": "357.00",
+          "gesamtbetrag_text": "357,00 €",
+          "leistung": "Unterhaltsreinigung Januar 2024",
+          "objektadresse": "Birkenallee 21, 12345 Musterstadt",
+          "objektadresse_normiert": "Birkenallee 21, 12345 Musterstadt"
+        }
+      ],
+      "params": {
+        "out": [
+          1512,
+          2016
+        ],
+        "quality": 85,
+        "exif_orientation": null,
+        "bg": "light"
+      },
+      "sha256": "9fdd66db45fa123ec508232ff0dea09047787d6bc5aa99043a5e9a5deefed898",
+      "size_bytes": 499233
+    },
+    {
+      "path": "Buchhaltung/Eingang/Fax/FAX_20220207_0832.tif",
+      "kind": "tiff_multipage",
+      "pages": 3,
+      "tags": [
+        "bilevel_g4",
+        "fax"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "nur_bild",
+          "doc_id": "lindqvist_2022",
+          "firma": "Malerbetrieb Lindqvist",
+          "rechnungsnummer": "M-2022-012",
+          "datum": "2022-01-24",
+          "datum_text": "24. Januar 2022",
+          "gesamtbetrag": "1241.65",
+          "gesamtbetrag_text": "1.241,65 €",
+          "leistung": "Kellerabgang und Kellerflur gestrichen",
+          "objektadresse": "Mühlenstraße 40, 12347 Musterstadt",
+          "objektadresse_normiert": "Mühlenstraße 40, 12347 Musterstadt"
+        },
+        {
+          "seite": 2,
+          "quelle": "nur_bild",
+          "doc_id": "yilmaz_2022",
+          "firma": "Schlüsseldienst Yilmaz",
+          "rechnungsnummer": "Q-220203-01",
+          "datum": "2022-02-03",
+          "datum_text": "03.02.2022",
+          "gesamtbetrag": "360.57",
+          "gesamtbetrag_text": "360,57 €",
+          "leistung": "Schließanlage: Schlüssel nachgefertigt, Kellertürzylinder",
+          "objektadresse": "Birkenallee 21, 12345 Musterstadt",
+          "objektadresse_normiert": "Birkenallee 21, 12345 Musterstadt"
+        },
+        {
+          "seite": 3,
+          "quelle": "nur_bild",
+          "doc_id": "petersen_2022",
+          "firma": "Hausmeisterdienst Petersen GmbH",
+          "rechnungsnummer": "HM-10544",
+          "datum": "2022-02-01",
+          "datum_text": "01.02.2022",
+          "gesamtbetrag": "343.67",
+          "gesamtbetrag_text": "343,67 €",
+          "leistung": "Winterdienst Januar 2022",
+          "objektadresse": "Musterstraße 12, 12345 Musterstadt",
+          "objektadresse_normiert": "Musterstraße 12, 12345 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "1a1200b2386c41fd3d6b60fa07dc26b507ee92dced8772db5ff1c23792359a51",
+      "size_bytes": 57456
+    },
+    {
+      "path": "Buchhaltung/Eingang/Scan_Stapel_März.pdf",
+      "kind": "sammel_pdf",
+      "pages": 6,
+      "tags": [
+        "gemischt_digital_und_scan"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "nordlicht_2021",
+          "firma": "Nordlicht Versicherung AG",
+          "rechnungsnummer": "BR-2021-789554",
+          "datum": "2021-01-04",
+          "datum_text": "4. Januar 2021",
+          "gesamtbetrag": "2166.28",
+          "gesamtbetrag_text": "EUR 2.166,28",
+          "leistung": "Beitragsrechnung Wohngebäudeversicherung 2021",
+          "objektadresse": "Birkenallee 21, 12345 Musterstadt",
+          "objektadresse_normiert": "Birkenallee 21, 12345 Musterstadt"
+        },
+        {
+          "seite": 2,
+          "quelle": "nur_bild",
+          "doc_id": "vogt_2021",
+          "firma": "Elektro Vogt GmbH & Co. KG",
+          "rechnungsnummer": "1502/21",
+          "datum": "2021-03-03",
+          "datum_text": "03.03.2021",
+          "gesamtbetrag": "251.09",
+          "gesamtbetrag_text": "251,09 €",
+          "leistung": "Störung Türsprechanlage behoben, Wohnungssprechstelle ersetzt",
+          "objektadresse": "Lindenweg 3, 12345 Musterstadt",
+          "objektadresse_normiert": "Lindenweg 3, 12345 Musterstadt"
+        },
+        {
+          "seite": 3,
+          "quelle": "textlayer",
+          "doc_id": "kranich_2021",
+          "firma": "Kranich Aufzugtechnik GmbH",
+          "rechnungsnummer": "INV-89977",
+          "datum": "2021-03-10",
+          "datum_text": "10.03.2021",
+          "gesamtbetrag": "508.13",
+          "gesamtbetrag_text": "€ 508,13",
+          "leistung": "Begleitung TÜV-Hauptprüfung Aufzug, Notlicht Kabine erneuert",
+          "objektadresse": "Birkenallee 21, 12345 Musterstadt",
+          "objektadresse_normiert": "Birkenallee 21, 12345 Musterstadt"
+        },
+        {
+          "seite": 4,
+          "quelle": "nur_bild",
+          "doc_id": "mueller_2021",
+          "firma": "Haustechnik Müller GmbH",
+          "rechnungsnummer": "2021-00219",
+          "datum": "2021-03-15",
+          "datum_text": "15.03.2021",
+          "gesamtbetrag": "459.34",
+          "gesamtbetrag_text": "459,34 €",
+          "leistung": "Thermostatventile getauscht, Heizkörper entlüftet",
+          "objektadresse": "Am Hang 7, 12349 Beispielhausen",
+          "objektadresse_normiert": "Am Hang 7, 12349 Beispielhausen"
+        },
+        {
+          "seite": 5,
+          "quelle": "textlayer",
+          "doc_id": "glanzwerk_2021",
+          "firma": "Glanzwerk Gebäudereinigung GmbH",
+          "rechnungsnummer": "GR-21-0402",
+          "datum": "2021-04-02",
+          "datum_text": "02.04.2021",
+          "gesamtbetrag": "621.18",
+          "gesamtbetrag_text": "621,18 €",
+          "leistung": "Treppenhausreinigung 1. Quartal 2021",
+          "objektadresse": "Mühlenstraße 40, 12347 Musterstadt",
+          "objektadresse_normiert": "Mühlenstraße 40, 12347 Musterstadt"
+        },
+        {
+          "seite": 6,
+          "quelle": "nur_bild",
+          "doc_id": "stadtwerke_2021",
+          "firma": "Stadtwerke Musterstadt GmbH",
+          "rechnungsnummer": "3001213302",
+          "datum": "2021-03-22",
+          "datum_text": "22.03.2021",
+          "gesamtbetrag": "820.83",
+          "gesamtbetrag_text": "820,83 €",
+          "leistung": "Jahresabrechnung Allgemeinstrom 2020",
+          "objektadresse": "Kastanienweg 5a, 12349 Beispielhausen",
+          "objektadresse_normiert": "Kastanienweg 5a, 12349 Beispielhausen"
+        }
+      ],
+      "params": null,
+      "sha256": "b1c4e0475ae0299f27a7896610559defb45c8a9dbe1f52752754d964286e62f0",
+      "size_bytes": 1047771
+    },
+    {
+      "path": "Buchhaltung/Eingang/Scans/scan0007.pdf",
+      "kind": "garbage_textlayer_pdf",
+      "pages": 1,
+      "tags": [
+        "unsichtbarer_muell_textlayer"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "nur_bild",
+          "doc_id": "glanzwerk_2022",
+          "firma": "Glanzwerk Gebäudereinigung GmbH",
+          "rechnungsnummer": "GR-22-0915",
+          "datum": "2022-03-30",
+          "datum_text": "30.03.2022",
+          "gesamtbetrag": "497.66",
+          "gesamtbetrag_text": "497,66 €",
+          "leistung": "Grundreinigung Wohnung nach Auszug, Fensterreinigung",
+          "objektadresse": "Kastanienweg 5a, 12349 Beispielhausen",
+          "objektadresse_normiert": "Kastanienweg 5a, 12349 Beispielhausen"
+        }
+      ],
+      "params": {
+        "dpi": 200,
+        "skew": -2.28,
+        "blur": 0.57,
+        "noise": 8.7,
+        "paper": 237,
+        "ink": 39,
+        "jpeg_q": 40,
+        "holes": true,
+        "edge": false,
+        "rotate": 0
+      },
+      "sha256": "ed80a08090cac35ad36d9276600f98fd3cd425fdfd286be9b7eb47a44da316f3",
+      "size_bytes": 417663
+    },
+    {
+      "path": "Scans unsortiert/Scan_2023-04-11.pdf",
+      "kind": "garbage_textlayer_pdf",
+      "pages": 1,
+      "tags": [
+        "unsichtbarer_muell_textlayer"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "nur_bild",
+          "doc_id": "gruenwerk_2023",
+          "firma": "Grünwerk Gartenpflege Schulte",
+          "rechnungsnummer": "GW 2023/052",
+          "datum": "2023-04-03",
+          "datum_text": "03.04.2023",
+          "gesamtbetrag": "499.80",
+          "gesamtbetrag_text": "499,80 €",
+          "leistung": "Rückschnitt Kirschlorbeer, Rasen vertikutiert",
+          "objektadresse": "Musterstraße 12, 12345 Musterstadt",
+          "objektadresse_normiert": "Musterstraße 12, 12345 Musterstadt"
+        }
+      ],
+      "params": {
+        "dpi": 200,
+        "skew": 1.64,
+        "blur": 0.62,
+        "noise": 9.0,
+        "paper": 236,
+        "ink": 57,
+        "jpeg_q": 43,
+        "holes": false,
+        "edge": true,
+        "rotate": 0
+      },
+      "sha256": "a7718b61436b37257b87fa621430a669c7db54255e29054a89cec790235bbf57",
+      "size_bytes": 446881
+    },
+    {
+      "path": "Mails/Anhänge/Kostennote_2024-0133_verschlüsselt.pdf",
+      "kind": "encrypted_pdf",
+      "pages": 1,
+      "tags": [],
+      "readable": false,
+      "expected_error": "encrypted",
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "verschluesselt",
+          "doc_id": "weissenfels_2024",
+          "firma": "Weißenfels & Partner Rechtsanwälte mbB",
+          "rechnungsnummer": "2024/0133",
+          "datum": "2024-02-06",
+          "datum_text": "06.02.2024",
+          "gesamtbetrag": "2005.15",
+          "gesamtbetrag_text": "2.005,15 €",
+          "leistung": "Räumungsklage wegen Mietrückstand (Kostennote RVG)",
+          "objektadresse": "Räumungsklage Wohnung EG links, Kastanienweg 5a, 12349 Beispielhausen",
+          "objektadresse_normiert": "Kastanienweg 5a, 12349 Beispielhausen"
+        }
+      ],
+      "params": null,
+      "password": "Sommer2024!",
+      "sha256": "a32d48cb6669540116b347237f9d9e7faa32cb2976a28c7953e5abadf8a76937",
+      "size_bytes": 86716
+    },
+    {
+      "path": "Mails/Anhänge/INV-93307.pdf",
+      "kind": "corrupt_pdf",
+      "pages": 1,
+      "tags": [
+        "abgeschnitten_40_prozent"
+      ],
+      "readable": false,
+      "expected_error": "corrupt",
+      "duplicate_of": null,
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "defekt",
+          "doc_id": "kranich_2024",
+          "firma": "Kranich Aufzugtechnik GmbH",
+          "rechnungsnummer": "INV-93307",
+          "datum": "2024-01-15",
+          "datum_text": "15.01.2024",
+          "gesamtbetrag": "1017.93",
+          "gesamtbetrag_text": "€ 1.017,93",
+          "leistung": "Wartung Personenaufzug 1. Halbjahr 2024",
+          "objektadresse": "Birkenallee 21, 12345 Musterstadt",
+          "objektadresse_normiert": "Birkenallee 21, 12345 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "72236a61b98b09c05672ac1f5ec410eb96138da60153c34d6cfac96ca1ce17d4",
+      "size_bytes": 26751
+    },
+    {
+      "path": "Buchhaltung/Nebenkosten 2023.xlsx",
+      "kind": "unsupported",
+      "pages": 0,
+      "tags": [],
+      "readable": false,
+      "expected_error": "unsupported",
+      "duplicate_of": null,
+      "facts": [],
+      "params": null,
+      "sha256": "8f3f485221773a46fbee0cca2c025fb812ca96b03d195afae07cf62a04ccd9e2",
+      "size_bytes": 574
+    },
+    {
+      "path": "Buchhaltung/~$Nebenkosten 2023.xlsx",
+      "kind": "unsupported",
+      "pages": 0,
+      "tags": [],
+      "readable": false,
+      "expected_error": "junk",
+      "duplicate_of": null,
+      "facts": [],
+      "params": null,
+      "sha256": "45fae2eb160417efc8bb1cdcbb4550849a9b1efd14f6ea380810e03c393d34d1",
+      "size_bytes": 161
+    },
+    {
+      "path": "Mails/Anhänge/AW Rechnung Heizung.msg",
+      "kind": "unsupported",
+      "pages": 0,
+      "tags": [],
+      "readable": false,
+      "expected_error": "unsupported",
+      "duplicate_of": null,
+      "facts": [],
+      "params": null,
+      "sha256": "99587350d55996507bec75043e358ab8a6c67406b7a1cb7a60ea433838747689",
+      "size_bytes": 4096
+    },
+    {
+      "path": "Verschiedenes/Mietvertrag Entwurf.docx",
+      "kind": "unsupported",
+      "pages": 0,
+      "tags": [],
+      "readable": false,
+      "expected_error": "unsupported",
+      "duplicate_of": null,
+      "facts": [],
+      "params": null,
+      "sha256": "3f0c494bd492a300fbc8d59877819e3f3a63c49d143690004c6309714023b526",
+      "size_bytes": 340
+    },
+    {
+      "path": "Mails/Anhänge/Rechnungen_2022.zip",
+      "kind": "unsupported",
+      "pages": 0,
+      "tags": [],
+      "readable": false,
+      "expected_error": "unsupported",
+      "duplicate_of": null,
+      "facts": [],
+      "params": null,
+      "sha256": "e123359dde9ec9a6760cd397adc373a6fd79cb73151709ea2af1651ccaece230",
+      "size_bytes": 201
+    },
+    {
+      "path": ".DS_Store",
+      "kind": "unsupported",
+      "pages": 0,
+      "tags": [],
+      "readable": false,
+      "expected_error": "junk",
+      "duplicate_of": null,
+      "facts": [],
+      "params": null,
+      "sha256": "84a3a81ad0e64c05479683eccd76879b9f5b7f1a1361dbfe82514c2c37544979",
+      "size_bytes": 4096
+    },
+    {
+      "path": "Buchhaltung/Eingang/Scans/Thumbs.db",
+      "kind": "unsupported",
+      "pages": 0,
+      "tags": [],
+      "readable": false,
+      "expected_error": "junk",
+      "duplicate_of": null,
+      "facts": [],
+      "params": null,
+      "sha256": "4696cd028533794b3db41d71200214f895ffa2f2951eca8c24c1b94a727bc8c7",
+      "size_bytes": 2048
+    },
+    {
+      "path": "Buchhaltung/Erledigt/2022/4711_22.pdf",
+      "kind": "duplicate_of",
+      "pages": 1,
+      "tags": [
+        "byte_identisch"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": "2022/Handwerker/Rechnung_Vogt.pdf",
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "vogt_2022",
+          "firma": "Elektro Vogt GmbH & Co. KG",
+          "rechnungsnummer": "4711/22",
+          "datum": "2022-05-17",
+          "datum_text": "17.05.2022",
+          "gesamtbetrag": "613.92",
+          "gesamtbetrag_text": "613,92 €",
+          "leistung": "E-Check und Austausch Klingeltableau",
+          "objektadresse": "Am Hang 7, 12349 Beispielhausen",
+          "objektadresse_normiert": "Am Hang 7, 12349 Beispielhausen"
+        }
+      ],
+      "params": null,
+      "sha256": "4a27a06ffaad97fa138959c5d28475de97ae353f3cfe16c0d61375da2a0edb52",
+      "size_bytes": 111037
+    },
+    {
+      "path": "Mails/Anhänge/Rechnung 4711-22.pdf",
+      "kind": "duplicate_of",
+      "pages": 1,
+      "tags": [
+        "byte_identisch"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": "2022/Handwerker/Rechnung_Vogt.pdf",
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "vogt_2022",
+          "firma": "Elektro Vogt GmbH & Co. KG",
+          "rechnungsnummer": "4711/22",
+          "datum": "2022-05-17",
+          "datum_text": "17.05.2022",
+          "gesamtbetrag": "613.92",
+          "gesamtbetrag_text": "613,92 €",
+          "leistung": "E-Check und Austausch Klingeltableau",
+          "objektadresse": "Am Hang 7, 12349 Beispielhausen",
+          "objektadresse_normiert": "Am Hang 7, 12349 Beispielhausen"
+        }
+      ],
+      "params": null,
+      "sha256": "4a27a06ffaad97fa138959c5d28475de97ae353f3cfe16c0d61375da2a0edb52",
+      "size_bytes": 111037
+    },
+    {
+      "path": "Mails/Anhänge/Beitragsrechnung.pdf",
+      "kind": "duplicate_of",
+      "pages": 1,
+      "tags": [
+        "byte_identisch"
+      ],
+      "readable": true,
+      "expected_error": null,
+      "duplicate_of": "Versicherung & Recht/Nordlicht/Beitrag 2019.pdf",
+      "facts": [
+        {
+          "seite": 1,
+          "quelle": "textlayer",
+          "doc_id": "nordlicht_2019",
+          "firma": "Nordlicht Versicherung AG",
+          "rechnungsnummer": "BR-2019-771903",
+          "datum": "2019-01-02",
+          "datum_text": "2. Januar 2019",
+          "gesamtbetrag": "1583.89",
+          "gesamtbetrag_text": "EUR 1.583,89",
+          "leistung": "Beitragsrechnung Wohngebäudeversicherung 2019",
+          "objektadresse": "Musterstraße 12, 12345 Musterstadt",
+          "objektadresse_normiert": "Musterstraße 12, 12345 Musterstadt"
+        }
+      ],
+      "params": null,
+      "sha256": "c48e36c176733870205f13c20ce550624cb3d339906567399f675b2b58bf9654",
+      "size_bytes": 85999
+    }
+  ]
+}

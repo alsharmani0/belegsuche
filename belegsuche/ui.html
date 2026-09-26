@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Belegsuche</title>
+<style>
+  :root {
+    --bg: #f6f6f3; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e4e3de;
+    --accent: #1f5fbf; --accent-text: #ffffff; --mark: #ffe38a; --warn-bg: #fff4d6; --warn: #7a5a00;
+    --chip: #eef1f6; --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #171716; --panel: #22221f; --text: #ecebe6; --muted: #a09f98; --line: #34332f;
+      --accent: #6aa0ff; --accent-text: #0b1730; --mark: #6b5510; --warn-bg: #3a2f10; --warn: #f3d27a; --chip: #2c2f36;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+  main { max-width: 900px; margin: 0 auto; padding: 28px 16px 60px; }
+  h1 { font-size: 20px; margin: 0 0 14px; font-weight: 650; letter-spacing: -0.01em; }
+  form { display: flex; gap: 8px; }
+  input[type=search] { flex: 1; font-size: 18px; padding: 12px 14px; border-radius: var(--radius);
+    border: 1px solid var(--line); background: var(--panel); color: var(--text); outline: none; }
+  input[type=search]:focus { border-color: var(--accent); }
+  button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--text);
+    border-radius: 8px; padding: 6px 11px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button:disabled { opacity: .45; cursor: default; }
+  .meta { color: var(--muted); font-size: 13px; margin: 10px 2px 16px; min-height: 18px; }
+  .banner { background: var(--warn-bg); color: var(--warn); padding: 10px 12px; border-radius: var(--radius);
+    margin: 12px 0 0; font-size: 14px; }
+  .hit { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 14px 16px; margin-bottom: 10px; }
+  .top { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .name { font-weight: 620; font-size: 16px; word-break: break-all; }
+  .chip { font-size: 12px; background: var(--chip); border-radius: 999px; padding: 1px 8px; color: var(--muted); }
+  .path { color: var(--muted); font-size: 13px; margin-top: 2px; word-break: break-all; }
+  .snip { margin: 8px 0 10px; }
+  mark { background: var(--mark); color: inherit; border-radius: 3px; padding: 0 1px; }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .actions a { font-size: 14px; color: var(--accent); margin-left: 4px; }
+  .miss { font-size: 12px; color: var(--muted); margin-left: auto; }
+  .dups { font-size: 12px; color: var(--muted); margin-top: 6px; word-break: break-all; }
+  .err { color: #c0392b; font-size: 13px; }
+  .empty { color: var(--muted); padding: 30px 4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Belegsuche</h1>
+  <form id="f" autocomplete="off">
+    <input id="q" type="search" placeholder="Firma, Rechnungsnummer, Betrag oder Beschreibung …" autofocus>
+    <button class="primary" type="submit">Suchen</button>
+  </form>
+  <div id="banner"></div>
+  <div class="meta" id="meta"></div>
+  <div id="results"></div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let timer = null, seq = 0;
+
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+async function status() {
+  try {
+    const s = await (await fetch('/api/status')).json();
+    const off = s.roots.filter(r => !r.online);
+    $('banner').innerHTML = off.length
+      ? `<div class="banner">Nicht verbunden: ${off.map(r => esc(r.path)).join(', ')}. Suchen geht, Öffnen erst nach dem Anschließen.</div>`
+      : '';
+    if (!$('q').value) $('meta').textContent = `${s.files.toLocaleString('de-DE')} Dokumente durchsuchbar`;
+  } catch (e) {}
+}
+
+const OFFLINE = 'läuft „belegsuche start“ noch?';
+
+async function openFile(id, reveal, btn) {
+  let msg = '';
+  try {
+    const r = await fetch('/api/open', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Belegsuche': '1'},
+                                        body: JSON.stringify({id, reveal})});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.error) msg = j.error || `Öffnen fehlgeschlagen (Fehler ${r.status})`;
+  } catch (e) {
+    msg = `Öffnen fehlgeschlagen – ${OFFLINE}`;
+  }
+  const span = btn.parentElement.querySelector('.err') || Object.assign(document.createElement('span'), {className: 'err'});
+  span.textContent = msg;
+  if (msg) btn.parentElement.appendChild(span);
+}
+
+async function search() {
+  const q = $('q').value.trim();
+  const my = ++seq;
+  if (!q) { $('results').innerHTML = ''; status(); return; }
+  let r;
+  try {
+    const resp = await fetch('/api/search?q=' + encodeURIComponent(q));
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    r = await resp.json();
+  } catch (e) {
+    if (my !== seq) return;   // veraltete Anfrage – neuere Suche ist schon unterwegs
+    $('results').innerHTML = '';
+    $('meta').textContent = `Suche fehlgeschlagen – ${OFFLINE}`;
+    return;
+  }
+  if (my !== seq) return;
+  const unknown = r.unknown.length ? ` · kommt nirgends vor: ${r.unknown.map(esc).join(', ')}` : '';
+  $('meta').innerHTML = `${r.hits.length} Treffer · ${r.ms} ms${unknown}`;
+  if (!r.hits.length) { $('results').innerHTML = '<div class="empty">Nichts gefunden. Weniger oder andere Wörter probieren.</div>'; return; }
+  $('results').innerHTML = r.hits.map(h => `
+    <div class="hit">
+      <div class="top">
+        <span class="name">${esc(h.filename)}</span>
+        ${h.pages > 1 ? `<span class="chip">Seite ${h.page} von ${h.pages}</span>` : ''}
+        ${h.ocr ? '<span class="chip">Scan</span>' : ''}
+        ${h.duplicates.length ? `<span class="chip">${h.duplicates.length + 1}× vorhanden</span>` : ''}
+      </div>
+      <div class="path">${esc(h.root)}/${esc(h.folder)}</div>
+      <div class="snip">${h.snippet}</div>
+      <div class="actions">
+        <button class="primary" ${h.available ? '' : 'disabled title="Laufwerk nicht verbunden"'} onclick="openFile(${h.id}, false, this)">Öffnen</button>
+        <button ${h.available ? '' : 'disabled'} onclick="openFile(${h.id}, true, this)">Im Finder zeigen</button>
+        ${h.pdf && h.pages > 1 && h.available ? `<a href="/datei/${h.id}#page=${h.page}" target="_blank" rel="noopener">Seite ${h.page} im Browser</a>` : ''}
+        ${h.missing.length ? `<span class="miss">nicht enthalten: ${h.missing.map(esc).join(', ')}</span>` : ''}
+      </div>
+      ${h.duplicates.length ? `<div class="dups">Auch unter: ${h.duplicates.map(esc).join(' · ')}</div>` : ''}
+    </div>`).join('');
+}
+
+$('f').addEventListener('submit', (e) => { e.preventDefault(); clearTimeout(timer); search(); });
+$('q').addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(search, 300); });
+status();
+</script>
+</body>
+</html>
