@@ -11,17 +11,44 @@ jobs:
   pytest:
     runs-on: macos-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # kleinste unterstützte Version (requires-python >= 3.10) und die aktuell genutzte
+        python-version: ["3.10", "3.12"]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
+      - name: Tesseract installieren
+        # sonst werden die Tesseract-Tests (needs_tesseract) übersprungen; tesseract-lang bringt das deutsche Modell
+        run: brew install tesseract tesseract-lang
       - name: Installieren
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
       - name: Tests
+        shell: bash   # mit pipefail: ein Testfehler lässt den Schritt trotz tee scheitern
         env:
           # Tests mit Apples Texterkennung werden übersprungen, falls Vision auf dem Runner keinen Text liest
           BELEGSUCHE_TEST_VISION_OPTIONAL: "1"
-        run: python -m pytest -rs
+        run: python -m pytest -rs | tee pytest.log
+      - name: Übersprungene Tests anzeigen
+        # Übersprungene Tests lassen den Lauf grün – hier werden sie als Warnung und in der Zusammenfassung sichtbar
+        if: always()
+        shell: bash
+        run: |
+          skipped=$(grep '^SKIPPED' pytest.log 2>/dev/null || true)
+          if [ -n "$skipped" ]; then
+            n=$(printf '%s\n' "$skipped" | wc -l | tr -d ' ')
+            echo "::warning title=Übersprungene Tests (Python ${{ matrix.python-version }})::${n} Zeile(n) mit übersprungenen Tests, siehe Zusammenfassung des Laufs"
+            {
+              echo "### Übersprungene Tests (Python ${{ matrix.python-version }})"
+              echo '```'
+              printf '%s\n' "$skipped"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Keine Tests übersprungen."
+          fi

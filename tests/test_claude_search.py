@@ -238,9 +238,22 @@ def test_erreichbare_kopie_hat_vorrang_und_offline_bleibt_suchbar(tmp_path):
 
 # --- Bericht bei sehr großem Bestand -----------------------------------------------------------
 
+def _variable_limit(con) -> int:
+    """Höchstzahl der ?-Platzhalter je Anweisung. Connection.getlimit gibt es erst ab Python 3.11."""
+    if hasattr(con, "getlimit"):
+        return con.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+    for n in (250000, 32766, 999):   # übliche Werte beim Übersetzen von SQLite (Homebrew, Standard neu/alt)
+        try:
+            con.execute(f"SELECT 1 WHERE 0 IN ({','.join('?' * n)})", [1] * n).fetchall()
+            return n
+        except sqlite3.OperationalError:
+            pass
+    return 999
+
+
 def test_bericht_mit_mehr_offenen_dateien_als_sqlite_variablen(tmp_path):
     con = dbm.connect(tmp_path / "i.db")
-    limit = con.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+    limit = _variable_limit(con)
     rid = con.execute("INSERT INTO roots(path) VALUES (?)", (str(tmp_path / "ssd"),)).lastrowid
     # z. B. erster Lauf über einen großen Bestand mit Ctrl+C abgebrochen: alles noch 'pending'
     con.executemany("INSERT INTO files(root_id, relpath, ext, kind, status) VALUES (?, ?, '.pdf', 'pdf', 'pending')",

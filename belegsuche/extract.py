@@ -10,6 +10,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from PIL import Image, ImageOps
 
@@ -33,6 +34,15 @@ MAX_IMAGE_PAGES = 1000        # mehrseitige Bilder (Fax-TIFF): höchstens so vie
 RETRY_BELOW_CHARS = 40        # OCR-Ergebnis so kurz -> zweiter Versuch mit Kontrastverstärkung
 RETRY_BELOW_CONF = 0.45
 NOTE_PREFIX = "Hinweis:"      # Hinweise zu fertig eingelesenen Dateien (stehen in files.error, Status 'done')
+
+# Wird nach jeder fertig verarbeiteten Seite aufgerufen. Der Arbeitsprozess beim Einlesen startet damit
+# sein Zeitlimit neu: es gilt je Seite, nicht für die ganze Datei (lange Sammel-PDFs sind kein Hänger).
+on_page_done: Callable[[], None] | None = None
+
+
+def _page_done() -> None:
+    if on_page_done is not None:
+        on_page_done()
 
 
 class ExtractError(Exception):
@@ -269,6 +279,7 @@ def extract_pdf(path: Path, engine) -> list[PageText]:
                     pages.append(PageText(i + 1, res.text, "ocr", res.confidence))
             finally:
                 page.close()
+                _page_done()
     finally:
         pdf.close()
     return pages
@@ -294,6 +305,7 @@ def _extract_frames(path: Path, engine, notes: list[str]) -> list[PageText]:
                 raise ExtractError(f"Bild nicht lesbar (Seite {i + 1}: {e})") from e
             res = _best_ocr(engine, frame)
             out.append(PageText(i + 1, res.text, "ocr", res.confidence))
+            _page_done()
     if total > MAX_IMAGE_PAGES:
         notes.append(f"{NOTE_PREFIX} nur die ersten {MAX_IMAGE_PAGES} von {total} Seiten eingelesen")
     return out

@@ -103,6 +103,7 @@ class Hit:
     ocr: bool
     available: bool
     duplicates: list[str] = field(default_factory=list)
+    outdated: bool = False     # Datei wurde geändert, Text stammt noch vom letzten Einlesen
 
     @property
     def fullpath(self) -> str:
@@ -303,6 +304,8 @@ _AMBIGUOUS_STREET = ("markt", "hof", "berg", "ring")
 # Währung direkt neben einem Betrag gehört zum Betrag ("1.234,56 EUR", "EUR 1.234,56")
 _CUR_AFTER_RE = re.compile(r"\s*(?:€|eur|euro)(?![\w])")
 _CUR_BEFORE_RE = re.compile(r"(?<![\w])(?:€|eur|euro)\s*$")
+# "Euro 500", "Euro 1.500": ganze Euro mit vorangestelltem "Euro" erkennt amounts() nicht (nur €/EUR davor)
+_CUR_NUM_RE = re.compile(r"(?<![\w])euro\s+(\d{1,3}(?:\.\d{3})+|\d+)(?![\w.,/\-])")
 # Dokumentart als hinterer Teil eines Kompositums: der vordere Teil ist das Thema und darf selbst in
 # Komposita stehen ("Hausmeisterrechnung" -> Rechnung über "Hausmeisterdienstleistung")
 DOC_TYPE_HEADS = {"rechnung", "rechnungen", "beleg", "belege", "liste", "uebersicht", "bescheid", "abrechnung",
@@ -389,6 +392,14 @@ def parse_query(query: str) -> list[Group]:
         cur = _CUR_AFTER_RE.match(q, e) or _CUR_BEFORE_RE.search(q, 0, s)
         if cur:
             q = _mask(q, cur.start(), cur.end())
+    for m in _CUR_NUM_RE.finditer(q):       # "Euro 500": ein Betrag, "euro" ist kein eigener Suchbegriff
+        num = m.group(1)
+        alts = {f"{AMT}{int(num.replace('.', ''))}": 1.0,
+                " ".join(words(m.group())): 1.0}      # so im Beleg geschrieben (dort nicht als Betrag erkannt)
+        if num.isdigit():
+            alts[num] = 0.9
+        groups.append(Group(m.group().strip(), "amount", alts))
+        q = _mask(q, m.start(), m.end())
     for m in _THOUSANDS_RE.finditer(q):     # "2.500" = Betrag (oder Nummer)
         n = int(m.group(1).replace(".", ""))
         groups.append(Group(m.group(1), "amount", {f"{AMT}{n}": 1.0, f"{ID}{n}": 0.9}))
@@ -939,8 +950,10 @@ class Searcher:
             ids_ = pids[chunk:chunk + 900]
             for r in con.execute(
                     "SELECT p.id AS pid, p.page_no, p.file_id, f.relpath, f.sha256, f.pages, f.ocr_pages, f.mtime,"
-                    " r.path AS root FROM pages p JOIN files f ON f.id = p.file_id JOIN roots r ON r.id = f.root_id"
-                    f" WHERE f.status = 'done' AND p.id IN ({','.join('?' * len(ids_))})", ids_):
+                    " f.status, r.path AS root FROM pages p JOIN files f ON f.id = p.file_id"
+                    " JOIN roots r ON r.id = f.root_id"
+                    # geänderte Dateien warten auf das Neu-Einlesen: bis dahin mit dem bisherigen Text finden
+                    f" WHERE f.status IN {dbm.SEARCHABLE_SQL} AND p.id IN ({','.join('?' * len(ids_))})", ids_):
                 meta[r["pid"]] = r
         by_file: dict[int, list[int]] = defaultdict(list)
         for rid in pages:
@@ -1015,7 +1028,9 @@ class Searcher:
 
         hits: list[Hit] = []
         for grp in order[:limit]:
-            main = next((f for f in grp if available(meta[f[2]])), grp[0])
+            # eine seit dem Einlesen geänderte Kopie (Text veraltet) nur, wenn keine aktuelle erreichbar ist
+            main = next((f for f in grp if meta[f[2]]["status"] == "done" and available(meta[f[2]])), None) \
+                or next((f for f in grp if available(meta[f[2]])), grp[0])
             score, fid, rid, W = main
             m = meta[rid]
             text = con.execute("SELECT text FROM pages WHERE id = ?", (rid,)).fetchone()[0]
@@ -1026,6 +1041,6 @@ class Searcher:
                 page_no=m["page_no"], pages=m["pages"] or 1, score=round(score, 4), snippet_html=snip_h,
                 snippet_text=snip_t, matched=[g.label for g, w in zip(live, W) if w > 0],
                 missing=[g.label for g, w in zip(live, W) if w == 0], ocr=bool(m["ocr_pages"]),
-                available=available(m),
+                available=available(m), outdated=m["status"] != "done",
                 duplicates=[os.path.join(meta[f[2]]["root"], meta[f[2]]["relpath"]) for f in grp if f is not main]))
         return SearchResponse(query, hits, unknown, len(cands), (time.time() - t0) * 1000)

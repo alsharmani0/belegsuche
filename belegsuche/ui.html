@@ -118,6 +118,7 @@ async function search() {
         <span class="name">${esc(h.filename)}</span>
         ${h.pages > 1 ? `<span class="chip">Seite ${h.page} von ${h.pages}</span>` : ''}
         ${h.ocr ? '<span class="chip">Scan</span>' : ''}
+        ${h.outdated ? '<span class="chip" title="Datei wurde geändert – Suchtext vom letzten Einlesen, bis belegsuche index sie neu einliest">geändert – wird neu eingelesen</span>' : ''}
         ${h.duplicates.length ? `<span class="chip">${h.duplicates.length + 1}× vorhanden</span>` : ''}
       </div>
       <div class="path">${esc(h.root)}/${esc(h.folder)}</div>

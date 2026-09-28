@@ -24,6 +24,17 @@ def _non_negative(v: str) -> int:
     return n
 
 
+def _positive(v: str) -> int:
+    """argparse-Typ für suche --limit: 0 oder negativ ergäbe "Nichts gefunden" bzw. schnitte Treffer ab."""
+    try:
+        n = int(v)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"keine ganze Zahl: {v!r}") from None
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"muss 1 oder größer sein: {n}")
+    return n
+
+
 def _safe(s: str) -> str:
     """Steuerzeichen aus Dateinamen/Texten nicht ans Terminal durchreichen."""
     return "".join(c if c.isprintable() or c in "\n\t" else repr(c)[1:-1] for c in str(s))
@@ -98,6 +109,8 @@ def cmd_search(args) -> int:
     for i, h in enumerate(resp.hits, 1):
         page = f"  (Seite {h.page_no}/{h.pages})" if h.pages > 1 else ""
         off = "" if h.available else "  [nicht verbunden]"
+        if h.outdated:
+            off += "  [geändert – wird neu eingelesen]"
         print(f"{i:>2}. {_safe(h.filename)}{page}{off}")
         print(f"    {_safe(os.path.join(h.root, h.folder))}")
         print(f"    {_safe(h.snippet_text)}")
@@ -207,7 +220,7 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("suche", parents=[common], help="in der Kommandozeile suchen")
     s.add_argument("anfrage", nargs="+")
-    s.add_argument("--limit", type=int, default=10)
+    s.add_argument("--limit", type=_positive, default=10, help="höchstens so viele Treffer anzeigen (Standard: 10)")
     s.set_defaults(func=cmd_search)
 
     s = sub.add_parser("start", parents=[common], help="Suchoberfläche im Browser öffnen")

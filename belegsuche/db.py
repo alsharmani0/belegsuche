@@ -16,6 +16,10 @@ SCHEMA_VERSION = 1
 # gespeicherten Seitentexten neu aufgebaut – ohne neue Texterkennung.
 INDEX_FORMAT = "8"
 FILE_TOKEN = "0f"            # + files.id, steht in der path-Spalte jeder Seite
+# Dateien, die Suche und Oberfläche anzeigen und öffnen: fertig eingelesen – oder seitdem geändert und noch
+# nicht neu eingelesen (bis dahin gilt der bisherige Text; er wird erst beim Neu-Einlesen ersetzt)
+SEARCHABLE_STATUS = ("done", "pending", "processing")
+SEARCHABLE_SQL = "(" + ", ".join(f"'{s}'" for s in SEARCHABLE_STATUS) + ")"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
@@ -79,7 +83,9 @@ def default_db_path() -> Path:
 
 def connect(path: Path, readonly: bool = False) -> sqlite3.Connection:
     if readonly:
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30, check_same_thread=False)
+        # als URI maskiert: "#", "?", "%" oder Leerzeichen im Pfad dürfen die Nur-Lese-Option nicht abschneiden
+        uri = Path(path).expanduser().resolve().as_uri() + "?mode=ro"
+        con = sqlite3.connect(uri, uri=True, timeout=30, check_same_thread=False)
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
         con = sqlite3.connect(path, timeout=30)

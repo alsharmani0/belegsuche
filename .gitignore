@@ -8,3 +8,6 @@ __pycache__/
 testdata/korpus/
 .claude/
 .DS_Store
+# Ausgaben/Eingaben von belegsuche bericht --csv, test --json u. ä. im Projektordner (echte Pfade, echte Suchfragen)
+/*.csv
+/*.json

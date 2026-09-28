@@ -37,6 +37,7 @@ MOVED_MIN_RATIO = 0.8        # … so viel davon muss am neuen Ort liegen
 BUMP_EVERY_FILES = 50        # laufende Suchserver sehen Neues spätestens nach so vielen Dateien …
 BUMP_EVERY_SECONDS = 60      # … oder so vielen Sekunden
 MAX_TASKS_PER_WORKER = 50    # Arbeitsprozess danach neu starten (gibt Speicher von Vision/pdfium sicher frei)
+STALL_TIMEOUT = 600          # Sekunden ohne fertige Seite -> Datei hängt (pdfium/Vision), Arbeitsprozess wird beendet
 ROOT_LOST_MSG = ("Ordner nicht mehr erreichbar (SSD getrennt?) – Einlesen angehalten. "
                  "Nach dem Anschließen erneut starten.")
 
@@ -621,11 +622,53 @@ def _init_worker(engine_name: str) -> None:
     _WORKER_ENGINE = make_engine(engine_name)
 
 
-def _extract_job(path: str) -> tuple[list[PageText], list[str]]:
+def _extract_job(path: str, marker: str | None = None,
+                 stall_timeout: float | None = None) -> tuple[list[PageText], list[str]]:
     crash_on = os.environ.get("BELEGSUCHE_TEST_CRASH_ON")   # nur für Tests: harten Absturz simulieren
     if crash_on and path.endswith(crash_on):
         os._exit(1)
-    return extract_with_notes(Path(path), _WORKER_ENGINE)
+    if not marker or not stall_timeout:
+        return extract_with_notes(Path(path), _WORKER_ENGINE)
+    import faulthandler
+    from . import extract as extract_mod
+    # Hängt pdfium oder Vision im C-Code, kommt Python selbst nicht mehr zum Zug. Der Wächter-Thread von
+    # faulthandler braucht dafür keinen Python-Code: nach stall_timeout Sekunden ohne fertige Seite schreibt
+    # er die Stapelspur in `marker` und beendet den Arbeitsprozess. Die nicht leere Datei zeigt dem
+    # Hauptprozess, dass es eine Zeitüberschreitung war und kein Absturz.
+    f = open(marker, "w")
+    try:
+        def arm() -> None:
+            faulthandler.dump_traceback_later(stall_timeout, exit=True, file=f)
+        arm()
+        extract_mod.on_page_done = arm
+        hang_on = os.environ.get("BELEGSUCHE_TEST_HANG_ON")   # nur für Tests: Hänger in C-Code simulieren
+        if hang_on and path.endswith(hang_on):
+            import ctypes
+            ctypes.PyDLL(None).sleep(3600)   # blockiert wie ein hängender Bibliotheksaufruf (hält den GIL)
+        return extract_with_notes(Path(path), _WORKER_ENGINE)
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+        extract_mod.on_page_done = None
+        f.close()
+        try:
+            os.unlink(marker)
+        except OSError:
+            pass
+
+
+def _timed_out(marker: str) -> bool:
+    """Hat der Arbeitsprozess wegen Zeitüberschreitung aufgegeben (siehe _extract_job)?"""
+    try:
+        return os.path.getsize(marker) > 0
+    except OSError:
+        return False
+
+
+def _timeout_msg() -> str:
+    t = STALL_TIMEOUT
+    dauer = f"{t / 60:g} min" if t >= 120 else f"{t:g} s"
+    return (f"Zeitlimit überschritten ({dauer} ohne Fortschritt) – Datei hängt beim Lesen oder bei der "
+            "Texterkennung")
 
 
 def _start_resource_tracker() -> None:
@@ -661,6 +704,17 @@ def _kill_pool(pool) -> None:
 
 
 def _process_parallel(con, todo, engine_name: str, workers: int, prog: _Progress) -> None:
+    import shutil
+    import tempfile
+    # Markierungsdateien für Zeitüberschreitungen: im System-Temp-Ordner, nie neben den Originalen
+    marker_dir = tempfile.mkdtemp(prefix="belegsuche-")
+    try:
+        _process_parallel_run(con, todo, engine_name, workers, prog, marker_dir)
+    finally:
+        shutil.rmtree(marker_dir, ignore_errors=True)
+
+
+def _process_parallel_run(con, todo, engine_name: str, workers: int, prog: _Progress, marker_dir: str) -> None:
     from collections import deque
     from concurrent.futures import FIRST_COMPLETED, wait
     from concurrent.futures.process import BrokenProcessPool
@@ -674,6 +728,9 @@ def _process_parallel(con, todo, engine_name: str, workers: int, prog: _Progress
     crashed: list = []
     pool = _make_pool(engine_name, workers)
     solo_running = False
+
+    def marker(r) -> str:
+        return os.path.join(marker_dir, f"{r['id']}.zeitlimit")
     try:
         while queue or solo or inflight or deferred:
             while not solo_running and ((solo and not inflight) or (queue and not solo and len(inflight) < workers * 2)):
@@ -697,7 +754,7 @@ def _process_parallel(con, todo, engine_name: str, workers: int, prog: _Progress
                     current = None
                     deferred.append(r)
                     continue
-                fut = pool.submit(_extract_job, os.path.join(r["root"], r["relpath"]))
+                fut = pool.submit(_extract_job, os.path.join(r["root"], r["relpath"]), marker(r), STALL_TIMEOUT)
                 inflight[fut] = (r, s, sha, t0)
                 current = None
                 inflight_sha.add(sha)
@@ -734,6 +791,18 @@ def _process_parallel(con, todo, engine_name: str, workers: int, prog: _Progress
                 _kill_pool(pool)
                 if any(_root_gone(r["root"]) for r in crashed):
                     raise _RootLost(crashed[0]["root"])   # SSD weg: die Dateien sind nicht schuld
+                hung = {r["id"] for r in crashed if _timed_out(marker(r))}
+                if hung:
+                    # Schuldige Datei(en) bekannt: nur sie als Fehler, die übrigen ohne Versuch zurück in die Reihe
+                    for r in crashed:
+                        if r["id"] in hung:
+                            prog.fail(r, ExtractError(_timeout_msg()))
+                    for r in reversed([r for r in crashed if r["id"] not in hung]):
+                        prog.back_to_pending(r)
+                        queue.appendleft(r)
+                    crashed = []
+                    pool = _make_pool(engine_name, workers)
+                    continue
                 for r in crashed:
                     att = con.execute("SELECT attempts FROM files WHERE id=?", (r["id"],)).fetchone()[0]
                     if att >= MAX_ATTEMPTS:

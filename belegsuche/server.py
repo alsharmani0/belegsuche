@@ -45,7 +45,7 @@ def _file_row(db_path: Path, file_id: int):
 def _resolve(db_path: Path, file_id: int) -> tuple[str | None, str | None]:
     """(echter Pfad ohne Symlinks, Fehlermeldung). Nur Dateien aus dem Index, nur innerhalb ihres Ordners."""
     row = _file_row(db_path, file_id)
-    if row is None or row["status"] != "done":
+    if row is None or row["status"] not in dbm.SEARCHABLE_STATUS:
         return None, "Unbekannte Datei"
     if not os.path.isdir(row["root"]):
         return None, f"Ordner nicht verbunden: {row['root']} – SSD anschließen?"
@@ -65,6 +65,7 @@ def _valid_id(v) -> bool:
 
 def make_handler(searcher: Searcher, port: int):
     allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+    allowed_origins = {f"http://{h}" for h in allowed_hosts}
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "Belegsuche"
@@ -88,6 +89,24 @@ def make_handler(searcher: Searcher, port: int):
             # Schutz gegen DNS-Rebinding: nur Anfragen an die lokale Adresse beantworten
             return self.headers.get("Host", "") in allowed_hosts
 
+        def _origin_ok(self) -> bool:
+            # Zusätzlich zu Sec-Fetch-Site (fehlt in älteren Browsern): Browser nennen bei Anfragen aus
+            # einer Seite deren Herkunft (Origin, bei POST immer) bzw. die Seite selbst (Referer). Stammt
+            # sie nicht von dieser Oberfläche, wird abgelehnt – auch "null" (Sandbox, file://).
+            # Fehlen beide (Adresszeile, Lesezeichen, webbrowser.open), bleibt es erlaubt.
+            origin = self.headers.get("Origin")
+            if origin is not None and origin not in allowed_origins:
+                return False
+            referer = self.headers.get("Referer")
+            if referer is not None:
+                try:
+                    u = urlparse(referer)
+                except ValueError:
+                    return False
+                if f"{u.scheme}://{u.netloc}" not in allowed_origins:
+                    return False
+            return True
+
         def _json(self, obj, status=200):
             body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
@@ -100,7 +119,8 @@ def make_handler(searcher: Searcher, port: int):
         def _handle(self, route):
             self._sent, self._csp = False, CSP_DEFAULT
             try:
-                if not self._host_ok() or self.headers.get("Sec-Fetch-Site") not in ALLOWED_FETCH_SITES:
+                if not self._host_ok() or self.headers.get("Sec-Fetch-Site") not in ALLOWED_FETCH_SITES \
+                        or not self._origin_ok():
                     return self._json({"error": "forbidden"}, 403)
                 route(urlparse(self.path))
             except (ConnectionError, TimeoutError):
@@ -145,6 +165,7 @@ def make_handler(searcher: Searcher, port: int):
                         "page": h.page_no, "pages": h.pages, "score": h.score, "snippet": h.snippet_html,
                         "matched": h.matched, "missing": h.missing, "ocr": h.ocr, "available": h.available,
                         "duplicates": h.duplicates, "pdf": h.filename.lower().endswith(".pdf"),
+                        "outdated": h.outdated,
                     } for h in resp.hits]})
             elif url.path == "/api/status":
                 con = dbm.connect(searcher.db_path, readonly=True)
