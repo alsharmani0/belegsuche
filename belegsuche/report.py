@@ -52,10 +52,14 @@ def build_report(con) -> dict:
         "SELECT f.id, f.relpath, r.path AS root, f.status, f.error, f.text_chars FROM files f"
         " JOIN roots r ON r.id = f.root_id WHERE f.status IN ('error', 'missing', 'pending')"
         " OR (f.status = 'done' AND (f.text_chars = 0 OR f.error IS NOT NULL))")}
-    ids = set(notes) | set(blank) | set(low)
-    rows = {row["id"]: row for row in con.execute(
-        f"SELECT f.id, f.relpath, r.path AS root, f.status, f.error, f.text_chars FROM files f"
-        f" JOIN roots r ON r.id = f.root_id WHERE f.id IN ({','.join('?' * len(ids))})", list(ids))} if ids else {}
+    rows = dict(notes)
+    # in Blöcken abfragen: mehr IDs als SQLite-Variablen erlaubt ("too many SQL variables")
+    extra_ids = list((set(blank) | set(low)) - set(notes))
+    for chunk in range(0, len(extra_ids), 900):
+        ids_ = extra_ids[chunk:chunk + 900]
+        rows.update({row["id"]: row for row in con.execute(
+            f"SELECT f.id, f.relpath, r.path AS root, f.status, f.error, f.text_chars FROM files f"
+            f" JOIN roots r ON r.id = f.root_id WHERE f.id IN ({','.join('?' * len(ids_))})", ids_)})
     order = {"error": 0, "missing": 1, "pending": 2, "done": 3}
     for fid, row in sorted(rows.items(), key=lambda kv: (order.get(kv[1]["status"], 9), kv[1]["relpath"])):
         if row["status"] == "error":

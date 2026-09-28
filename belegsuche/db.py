@@ -14,7 +14,7 @@ from pathlib import Path
 SCHEMA_VERSION = 1
 # Format der Suchtexte (Zusatz-Tokens, Dokument-Index). Ändert es sich, wird der Suchindex aus den
 # gespeicherten Seitentexten neu aufgebaut – ohne neue Texterkennung.
-INDEX_FORMAT = "7"
+INDEX_FORMAT = "8"
 FILE_TOKEN = "0f"            # + files.id, steht in der path-Spalte jeder Seite
 
 SCHEMA = """

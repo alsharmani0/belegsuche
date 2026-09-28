@@ -64,10 +64,6 @@ def test_strassen_schreibweisen_auch_mit_bindestrich():
         assert {"musterstrasse", "musterstr"} <= toks, t
 
 
-@pytest.mark.xfail(strict=True, reason="Bug: bei getrennt geschriebener Straße ('Muster Str. 12', 'Muster-Straße 12') "
-                                         "entsteht das Hausnummer-Token nur als 0hnstrasse12 statt "
-                                         "0hnmusterstrasse12 – die Hausnummer zählt dann nicht zur Straße, und "
-                                         "'Musterstraße 21, Whg. 12' landet vor dem richtigen Beleg")
 @pytest.mark.parametrize("schreibweise", ["Muster Str. 12", "Muster-Straße 12"])
 def test_hausnummer_gehoert_zur_strasse_auch_bei_getrennter_schreibweise(tmp_path, schreibweise):
     s = build(tmp_path, {"ziel.pdf": [f"Objekt {schreibweise}, 12345 Musterstadt", *FILLER],
@@ -134,9 +130,6 @@ def test_hausmeister_findet_hauswart_auf_platz_eins_oder_zwei_mit_hausmeisterdie
     assert set(got) == {"hauswart.pdf", "strasse.pdf"}
 
 
-@pytest.mark.xfail(strict=True, reason="Bug: Währungswort 'EUR'/'Euro' neben einem Betrag in der Anfrage wird "
-                                         "als eigener Suchbegriff gewertet – der richtige Beleg mit '€' bekommt "
-                                         "'nicht enthalten: eur', Belege mit anderem Betrag aber 'EUR' rutschen nach")
 def test_betrag_mit_eur_in_der_anfrage_gleich_wie_mit_eurozeichen(belege):
     resp = belege.search("1.234,56 EUR")
     assert resp.hits[0].relpath == "heizung.pdf"
@@ -203,9 +196,6 @@ def test_fehlende_synonymdatei_ist_kein_fehler(tmp_path):
     assert "hauswart" in table["hausmeister"]
 
 
-@pytest.mark.xfail(strict=True, reason="Bug: synonyme.txt wird fest als UTF-8 gelesen – eine in Windows-/Excel-"
-                                         "Kodierung (cp1252/UTF-16) gespeicherte Datei lässt jede Suche mit "
-                                         "UnicodeDecodeError abstürzen")
 @pytest.mark.parametrize("encoding", ["cp1252", "utf-16"])
 def test_synonymdatei_in_anderer_kodierung_bricht_suche_nicht_ab(tmp_path, encoding):
     (tmp_path / "synonyme.txt").write_bytes("objektbetreuer, gebäudeservice\n".encode(encoding))
@@ -248,9 +238,6 @@ def test_erreichbare_kopie_hat_vorrang_und_offline_bleibt_suchbar(tmp_path):
 
 # --- Bericht bei sehr großem Bestand -----------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="Bug: build_report fragt alle Problemdateien mit einem einzigen "
-                                         "'WHERE f.id IN (?,?,…)' ab – mehr Problemdateien als SQLite-Variablen "
-                                         "(hier 250000, üblich 32766) -> OperationalError 'too many SQL variables'")
 def test_bericht_mit_mehr_offenen_dateien_als_sqlite_variablen(tmp_path):
     con = dbm.connect(tmp_path / "i.db")
     limit = con.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)

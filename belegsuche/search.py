@@ -33,8 +33,8 @@ from rapidfuzz import fuzz, process
 from rapidfuzz.distance import OSA
 
 from . import db as dbm
-from .normalize import (AMT, HN, ID, ID_SEP_RE, WORD_RE, YR, _compact, amounts, date_spans, dates, fold, id_tokens_for,
-                        ids, is_decimal, words)
+from .normalize import (AMT, HN, ID, ID_SEP_RE, MO, WORD_RE, YR, _compact, amounts, date_spans, dates, fold,
+                        id_tokens_for, ids, is_decimal, street_head, words)
 from .synonyms import STOPWORDS, load_synonyms
 
 KIND_WEIGHT = {"word": 1.0, "phrase": 1.5, "number": 1.3, "amount": 2.0, "id": 2.2, "date": 1.6}
@@ -293,6 +293,16 @@ _ORDINALS = {1: ("erste", "ersten", "erstes"), 2: ("zweite", "zweiten", "zweites
 _ORD_FLOOR_RE = re.compile(rf"(?<![\w])({'|'.join(w for ws in _ORDINALS.values() for w in ws)})\s+{_FLOOR_WORDS}(?![\w])")
 _YEARS_RE = re.compile(r"(?<![\d/.\-])((?:19|20)\d{2})\s?[/\-–]\s?((?:19|20)\d{2}|\d{2})(?![\d/.\-])")
 _PREFIX_ID_RE = re.compile(r"(?<![\w])([a-z]{1,4})\.?\s+(\d{3,})(?![\w.,/])")
+# Übliche Kürzel vor Nummern (Rechnung, Kunde, Konto, Aktenzeichen …). Andere kurze Wörter ("Dach 800",
+# "Gas 450") bleiben Suchwort + Zahl – außer sie sind in Großbuchstaben getippt ("WEG 1234" wie im Beleg).
+ID_PREFIXES = {"re", "rg", "rn", "rnr", "renr", "nr", "no", "kd", "knr", "kdnr", "kto", "inv", "az", "gz", "vn", "vnr",
+               "vsnr", "id", "ref", "st", "stnr", "ust", "lfd", "best", "lief"}
+# Straßen-Endungen, die auch in gewöhnlichen Wörtern stecken (Baumarkt, Bauhof …): die Zahl danach
+# kann ebenso ein Betrag oder eine Nummer sein
+_AMBIGUOUS_STREET = ("markt", "hof", "berg", "ring")
+# Währung direkt neben einem Betrag gehört zum Betrag ("1.234,56 EUR", "EUR 1.234,56")
+_CUR_AFTER_RE = re.compile(r"\s*(?:€|eur|euro)(?![\w])")
+_CUR_BEFORE_RE = re.compile(r"(?<![\w])(?:€|eur|euro)\s*$")
 # Dokumentart als hinterer Teil eines Kompositums: der vordere Teil ist das Thema und darf selbst in
 # Komposita stehen ("Hausmeisterrechnung" -> Rechnung über "Hausmeisterdienstleistung")
 DOC_TYPE_HEADS = {"rechnung", "rechnungen", "beleg", "belege", "liste", "uebersicht", "bescheid", "abrechnung",
@@ -310,7 +320,10 @@ def _floor_alts(n: int) -> dict[str, float]:
 
 
 def _address_alts(street: str, num: str, letter: str | None) -> dict[str, float]:
-    """Hausnummer nur zusammen mit ihrer Straße voll werten ("Musterstädter Weg 7" ≠ "Musterstädter Weg 9")."""
+    """Hausnummer nur zusammen mit ihrer Straße voll werten ("Musterstädter Weg 7" ≠ "Musterstädter Weg 9").
+
+    Bei mehrdeutiger Endung ("Baumarkt 120") zählt eine mindestens dreistellige Zahl auch als Betrag/Nummer –
+    mit 90 % des üblichen Gewichts, also schwächer als die Adresse selbst."""
     variants = {street}
     if street.endswith("strasse"):
         variants.add(street[:-7] + "str")
@@ -324,11 +337,20 @@ def _address_alts(street: str, num: str, letter: str | None) -> dict[str, float]
             alts[f"{v} {num}{letter}"] = 1.0
             alts[f"{v} {num} {letter}"] = 1.0
     alts[num] = 0.3            # Zahl irgendwo anders auf der Seite: nur ein schwacher Hinweis
+    if street.endswith(_AMBIGUOUS_STREET) and len(num) >= 3:
+        for a, w in _number_alts(num).items():
+            alts[a] = max(alts.get(a, 0.0), round(0.9 * w, 3))
     return alts
 
 
 def _number_alts(t: str) -> dict[str, float]:
     n = int(t)
+    if len(t) > 1 and t[0] == "0":         # führende Null ("00487"): Nummer, kein Betrag und kein Jahr
+        alts = {t: 1.0}
+        if len(t) >= 4:
+            alts[f"{ID}{t}"] = 1.0
+            alts[f"{ID}{t}*"] = 0.6
+        return alts
     alts = {t: 0.9 if len(t) >= 3 else 1.0}
     if len(t) == 4 and 1900 <= n <= 2099:
         alts[f"{YR}{t}"] = 1.0
@@ -364,6 +386,9 @@ def parse_query(query: str) -> list[Group]:
             alts[toks[1]] = 0.9
         groups.append(Group(q[s:e].strip(), "amount", alts))
         q = _mask(q, s, e)
+        cur = _CUR_AFTER_RE.match(q, e) or _CUR_BEFORE_RE.search(q, 0, s)
+        if cur:
+            q = _mask(q, cur.start(), cur.end())
     for m in _THOUSANDS_RE.finditer(q):     # "2.500" = Betrag (oder Nummer)
         n = int(m.group(1).replace(".", ""))
         groups.append(Group(m.group(1), "amount", {f"{AMT}{n}": 1.0, f"{ID}{n}": 0.9}))
@@ -379,9 +404,21 @@ def parse_query(query: str) -> list[Group]:
         q = _mask(q, m.start(), m.end())
     for m in _YEARS_RE.finditer(q):         # "2024/2025", "2024/25" = Zeitraum, keine Nummer
         y1, y2 = m.group(1), m.group(2)
-        y2 = y1[:2] + y2 if len(y2) == 2 else y2
+        if len(y2) == 2:
+            if int(y2) != (int(y1) + 1) % 100:
+                if 1 <= int(y2) <= 12:      # "2020-12" = Dezember 2020 (oder so geschriebene Nummer)
+                    groups.append(Group(f"{y1}-{y2}", "date", {f"{MO}{y1}{y2}": 1.0, f"{y1} {y2}": 1.0,
+                                                               f"{ID}{y1}{y2}": 1.0}))
+                    q = _mask(q, m.start(), m.end())
+                continue                    # sonst eine Nummer ("2021/37") – siehe unten
+            y2 = str(int(y1) + 1)
+        elif int(y2) <= int(y1):
+            continue
         alts = {f"{y1} {y2}": 1.0, f"all:{YR}{y1} {YR}{y2}": 1.0, f"{YR}{y1}": 0.6, f"{YR}{y2}": 0.6,
                 f"{ID}{y1}{y2}": 0.8}
+        if int(y2) == int(y1) + 1:          # so wie im Beleg geschrieben: "2024/25" (auch als Nummer 2021/22)
+            alts[f"{y1} {y2[2:]}"] = 1.0
+            alts[f"{ID}{y1}{y2[2:]}"] = 1.0
         groups.append(Group(f"{y1}/{y2}", "date", alts))
         q = _mask(q, m.start(), m.end())
     for m in _FLOOR_RE.finditer(q):         # "1. Etage", "3. OG"
@@ -393,8 +430,16 @@ def parse_query(query: str) -> list[Group]:
         q = _mask(q, m.start(), m.end())
     for m in _ADDR_RE.finditer(q):          # "Musterstädter Weg 7" = Straße + Hausnummer als Einheit
         street, num, letter = m.group(1), m.group(2), m.group(3)
+        mask_from = m.start(2)
+        head = street_head(q, m.start(1)) if street in ("str", "strasse") else None
+        if head and head[0] in STOPWORDS:   # "in der Str. 5": "der" ist kein Straßenname (Prüfer-Korrektur)
+            head = None
+        if head:                          # "Muster Str. 12" = "Musterstr. 12" (wie street_tokens im Index)
+            street = head[0] + street
+            groups.append(Group(street, "word", {street: 1.0}))
+            mask_from = head[1]
         groups.append(Group(f"{street} {num}{letter or ''}", "number", _address_alts(street, num, letter)))
-        q = _mask(q, m.start(2), m.end())
+        q = _mask(q, mask_from, m.end())
     for m in ID_SEP_RE.finditer(q):
         toks = id_tokens_for(_compact(m.group(1)))
         if not toks:
@@ -412,6 +457,8 @@ def parse_query(query: str) -> list[Group]:
         pre, num = m.group(1), m.group(2)
         if pre in STOPWORDS or (len(num) == 4 and 1900 <= int(num) <= 2099):
             continue
+        if pre not in ID_PREFIXES and not re.search(rf"(?<![^\W\d_]){pre.upper()}(?![^\W\d_])", query):
+            continue                        # "Dach 800": Suchwort + Zahl (Betrag/Nummer), kein Kürzel
         groups.append(Group(f"{pre} {num}", "id", {f"{ID}{pre}{num}": 1.0, f"{pre} {num}": 1.0,
                                                    f"{ID}{num}": 0.9, num: 0.85}))
         q = _mask(q, m.start(), m.end())

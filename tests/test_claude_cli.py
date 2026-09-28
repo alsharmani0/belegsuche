@@ -148,8 +148,6 @@ def test_index_limit_ist_fortsetzbar(tmp_path, capsys):
     assert "noch offen:              0" in out and "durchsuchbar:            3" in out
 
 
-@pytest.mark.xfail(strict=True, reason="Bug: --limit mit negativer Zahl wird als Python-Slice todo[:-1] "
-                                         "ausgewertet und verarbeitet alle Dateien bis auf die letzte")
 def test_index_negatives_limit_verarbeitet_nichts_oder_wird_abgelehnt(tmp_path, capsys):
     root = tmp_path / "k"
     root.mkdir()

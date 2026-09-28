@@ -242,6 +242,15 @@ HN = "0hn"   # Hausnummer an ihrer Straße: 0hnweg7 = "... Weg 7" (auch innerhal
 STREET_SUFFIX = (r"(?:strasse|str|weg|allee|platz|ring|damm|gasse|chaussee|ufer|stieg|steig|twiete|kamp|redder|"
                  r"deich|pfad|wall|koppel|markt|berg|hof)")
 _HOUSE_RE = re.compile(rf"(?<![\w])([a-z]*{STREET_SUFFIX})\.?\s+(\d{{1,3}})(?:\s?[-–/,]\s?(\d{{1,3}}))?(?![\d])")
+# Wort direkt vor einer allein stehenden Endung "Str."/"Straße" ("Muster Str. 12", "Muster-Straße 12")
+_STREET_HEAD_RE = re.compile(r"(?<![\w])([a-z]{3,})(?:\s+|\s?-\s?)$")
+
+
+def street_head(folded: str, start: int) -> tuple[str, int] | None:
+    """Das Wort vor "str"/"strasse" an Position `start` und seine Position – wie in street_tokens
+    (nur Buchstaben, ab 3 Zeichen)."""
+    m = _STREET_HEAD_RE.search(folded, max(0, start - 60), start)
+    return (m.group(1), m.start(1)) if m else None
 
 
 def house_number_tokens(folded: str) -> list[str]:
@@ -253,10 +262,15 @@ def house_number_tokens(folded: str) -> list[str]:
         if not (a <= b <= a + 40):
             b = a
         variants = {street}
-        if street.endswith("strasse"):
-            variants.add(street[:-7] + "str")
-        elif street.endswith("str"):
-            variants.add(street + "asse")
+        if street in ("str", "strasse"):     # "Muster Str. 12" = "Musterstraße 12"
+            head = street_head(folded, m.start(1))
+            if head:
+                variants.add(head[0] + street)
+        for v in list(variants):
+            if v.endswith("strasse"):
+                variants.add(v[:-7] + "str")
+            elif v.endswith("str"):
+                variants.add(v + "asse")
         out += [f"{HN}{v}{n}" for v in variants for n in range(a, b + 1)]
     return out
 

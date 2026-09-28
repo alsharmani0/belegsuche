@@ -13,6 +13,17 @@ from . import db as dbm
 DEFAULT_PARALLEL = max(1, min(8, (os.cpu_count() or 2) - 2))
 
 
+def _non_negative(v: str) -> int:
+    """argparse-Typ für --limit: negative Zahlen würden sonst als Python-Slice wirken (todo[:-1])."""
+    try:
+        n = int(v)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"keine ganze Zahl: {v!r}") from None
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"muss 0 oder größer sein: {n}")
+    return n
+
+
 def _safe(s: str) -> str:
     """Steuerzeichen aus Dateinamen/Texten nicht ans Terminal durchreichen."""
     return "".join(c if c.isprintable() or c in "\n\t" else repr(c)[1:-1] for c in str(s))
@@ -185,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("index", parents=[common], help="Ordner einlesen bzw. aktualisieren (fortsetzbar)")
     s.add_argument("ordner", nargs="*", help="Ordner; ohne Angabe: alle bekannten Ordner aktualisieren")
     s.add_argument("--ocr", choices=["apple", "tesseract"], default="apple", help="Texterkennung (Standard: apple)")
-    s.add_argument("--limit", type=int, help="höchstens so viele Dateien verarbeiten (zum Testen)")
+    s.add_argument("--limit", type=_non_negative, help="höchstens so viele Dateien verarbeiten (zum Testen)")
     s.add_argument("--parallel", type=int, default=DEFAULT_PARALLEL,
                    help=f"Anzahl paralleler Prozesse für die Texterkennung (Standard hier: {DEFAULT_PARALLEL})")
     s.add_argument("--fehler-wiederholen", action="store_true",
