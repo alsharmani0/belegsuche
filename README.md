@@ -35,6 +35,13 @@ nur die schon bekannten Ordner, danach folgt der Bericht) oder `Belegsuche start
 Browser; das Terminalfenster offen lassen, solange gesucht wird). Beide erwarten die `.venv` im Projektordner wie oben
 angelegt.
 
+**Aktualisieren:** `git pull` im Projektordner genügt. Wegen `pip install -e .` laufen `.venv/bin/belegsuche` und die
+beiden `.command`-Starter direkt auf dem Code in diesem Ordner, also sofort auf dem neuen Stand (`pip install -e .`
+nur erneut, wenn sich die Abhängigkeiten in `pyproject.toml` ändern). Ändert ein Update das Indexformat (zuletzt von
+7 auf 8), baut der erste Aufruf den Suchindex einmalig neu auf, siehe [Benutzung](#benutzung). Am besten das gleich
+nach dem Update anstoßen: `Ordner einlesen.command` doppelklicken und „Abbrechen“ wählen. Messwerte, bekannte Grenzen
+und offene Punkte: [docs/STAND.md](docs/STAND.md).
+
 ## Benutzung
 
 ```bash
