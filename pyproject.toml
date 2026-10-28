@@ -7,7 +7,7 @@ name = "belegsuche"
 version = "0.1.0"
 description = "Belege und Dokumente lokal auf dem Mac durchsuchen – mit Texterkennung für Scans."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Belegsuche contributors" }]   # wie in LICENSE
@@ -16,12 +16,12 @@ classifiers = [
     "Environment :: Console",
     "Natural Language :: German",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
     "pypdfium2>=4.30",
-    "pillow>=10",
+    "pillow>=13.0.0",
     "rapidfuzz>=3",
     "pyobjc-framework-Vision>=10; sys_platform == 'darwin'",
     "pyobjc-framework-Quartz>=10; sys_platform == 'darwin'",
