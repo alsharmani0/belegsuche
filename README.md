@@ -22,8 +22,9 @@ Belege, Rechnungen und Dokumente auf dem Mac durchsuchen – auch eingescannte, 
 
 ## Installation
 
-Voraussetzung: macOS 13 oder neuer, Python 3.10+. Das von macOS mitgelieferte `python3` (3.9) ist zu alt:
-dann zuerst `brew install python@3.12` und im zweiten Befehl `python3.12 -m venv .venv` statt `python3 -m venv .venv`.
+Voraussetzung: macOS 13 oder neuer, Python 3.11+ und Pillow 13.0.0+ (wird mitinstalliert).
+Mit `python3 --version` prüfen: Bei Python 3.10 oder älter zuerst `brew install python@3.12` und im zweiten
+Befehl `python3.12 -m venv .venv` statt `python3 -m venv .venv` verwenden.
 
 ```bash
 git clone https://github.com/alsharmani0/belegsuche.git && cd belegsuche
@@ -35,10 +36,45 @@ nur die schon bekannten Ordner, danach folgt der Bericht) oder `Belegsuche start
 Browser; das Terminalfenster offen lassen, solange gesucht wird). Beide erwarten die `.venv` im Projektordner wie oben
 angelegt.
 
-**Aktualisieren:** `git pull` im Projektordner genügt. Wegen `pip install -e .` laufen `.venv/bin/belegsuche` und die
-beiden `.command`-Starter direkt auf dem Code in diesem Ordner, also sofort auf dem neuen Stand (`pip install -e .`
-nur erneut, wenn sich die Abhängigkeiten in `pyproject.toml` ändern). Ändert ein Update das Indexformat (zuletzt von
-7 auf 8), baut der erste Aufruf den Suchindex einmalig neu auf, siehe [Benutzung](#benutzung). Am besten das gleich
+**Aktualisieren:** Die laufende Belegsuche und Einlese-Läufe beenden. Im Projektordner aktualisieren:
+
+```bash
+git pull &&
+.venv/bin/python --version
+```
+
+Ab dieser Version werden Python 3.11+ und Pillow 13.0.0+ benötigt, weil ältere Pillow-Versionen bekannte
+Sicherheitslücken in Bilddecodern enthalten. `git pull` allein aktualisiert die installierten Abhängigkeiten nicht.
+Bei einer vorhandenen `.venv` mit Python 3.11 oder neuer:
+
+```bash
+.venv/bin/python -m pip install --upgrade -e . &&
+.venv/bin/python -m pip check
+```
+
+Bei Python 3.10 oder älter die Umgebung mit einem neueren Interpreter neu anlegen; ein Paket-Upgrade in der
+alten Umgebung reicht nicht. Der folgende Ablauf bewahrt die alte Umgebung in `.venv-alt` auf (dieser Name
+muss noch frei sein). Nach erfolgreicher Installation kann sie gelöscht werden:
+
+```bash
+test ! -e .venv-alt && test ! -L .venv-alt &&
+brew install python@3.12 &&
+mv .venv .venv-alt &&
+python3.12 -m venv .venv &&
+.venv/bin/python -m pip install -e . &&
+.venv/bin/python -m pip check
+```
+
+Scheitert ein Schritt nach dem Umbenennen, bleibt die alte Umgebung in `.venv-alt` erhalten. Zurücksetzen:
+die unvollständige neue `.venv`, falls vorhanden, unter einem noch freien Namen beiseitelegen und `.venv-alt`
+wieder `.venv` nennen. Vor dem nächsten Start muss die Umstellung auf Python 3.11+ und Pillow 13.0.0+ erfolgreich
+abgeschlossen sein.
+
+Der Standard-Suchindex liegt außerhalb der `.venv` und bleibt dabei erhalten. Die Originaldateien werden
+durch diese Schritte nicht verändert. Wegen der editierbaren Installation verwenden `.venv/bin/belegsuche`
+und beide `.command`-Starter den aktuellen Projektcode.
+Ändert ein Update das Indexformat (zuletzt von 7 auf 8), baut der erste Aufruf den Suchindex einmalig neu auf,
+siehe [Benutzung](#benutzung). Am besten das gleich
 nach dem Update anstoßen: `Ordner einlesen.command` doppelklicken und „Abbrechen“ wählen. Messwerte, bekannte Grenzen
 und offene Punkte: [docs/STAND.md](docs/STAND.md).
 
@@ -159,7 +195,7 @@ Suchqualität auf dem künstlichen Testbestand nachmessen (Soll: 26/26 und 16/16
 .venv/bin/belegsuche --db /tmp/korpus.db test testdata/queries_holdout.csv
 ```
 
-In der CI (GitHub Actions, Python 3.10 und 3.12) werden Vision-Tests übersprungen, falls der Runner keinen Text
+In der CI (GitHub Actions, Python 3.11 und 3.12) werden Vision-Tests übersprungen, falls der Runner keinen Text
 erkennt; lokal laufen sie immer. Übersprungene Tests stehen als Warnung in der Zusammenfassung des Laufs.
 
 Lizenz: MIT
