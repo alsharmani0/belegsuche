@@ -109,6 +109,12 @@ Die Texterkennung läuft parallel in mehreren Prozessen (Standard: Anzahl Kerne 
 Geänderte Dateien bleiben bis zum nächsten `belegsuche index` mit ihrem bisherigen Text auffindbar und lassen sich
 öffnen; die Suche kennzeichnet sie mit „geändert – wird neu eingelesen“.
 
+Umbenannte oder innerhalb eines Ordners verschobene Dateien erkennt `belegsuche index` am Inhalt: Der Text wird
+übernommen (keine neue Texterkennung), der alte Eintrag entfernt, die Zusammenfassung meldet „umbenannt/verschoben: N“.
+Gelöschte Dateien ohne Gegenstück zählt der Bericht weiter unter „fehlen im Ordner“. Wirken Datei- oder Ordnernamen
+beim Kopieren beschädigt (z. B. `šbergabe` statt `Übergabe`, typisch für die Windows App), zeigt der Bericht
+„Dateinamen mit beschädigten Umlauten: N“ mit Vorschlägen; umbenannt wird nichts automatisch.
+
 Nach einem Update kann der erste Aufruf (`index`, `suche`, `start`, `bericht`, `test` oder `ordner`) länger dauern:
 Ändert sich das Format des Suchindex (zuletzt auf Format 8, für Hausnummern bei getrennt geschriebenen Straßen wie
 „Muster Str. 12“), wird er einmalig aus den gespeicherten Seitentexten neu aufgebaut – ohne neue Texterkennung.

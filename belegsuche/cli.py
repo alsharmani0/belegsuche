@@ -83,6 +83,9 @@ def cmd_index(args) -> int:
     print()
     print(f"Fertig: {ps.done} Dateien verarbeitet ({ps.reused} übernommen, {ps.ocr_pages} Seiten per Texterkennung), "
           f"{ps.errors} Fehler, {ps.seconds / 60:.1f} min.")
+    renamed = sum(s.renamed for s in scans)
+    if renamed:
+        print(f"umbenannt/verschoben: {renamed} (alte Einträge entfernt, Text übernommen)")
     if ps.skipped_offline:
         print(f"{ps.skipped_offline} Dateien warten auf einen nicht verbundenen Ordner.")
     retryable = con.execute("SELECT count(*) FROM files WHERE status = 'error' AND error NOT LIKE 'PDF ist passwort%'"

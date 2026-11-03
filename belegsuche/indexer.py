@@ -6,6 +6,7 @@
 - Ist der Ordner (z. B. die SSD) nicht erreichbar, wird nichts als gelöscht markiert.
   Verschwindet er mitten im Lauf, wird angehalten; die offenen Dateien bleiben offen.
 - Verschobene oder doppelte Dateien werden am Inhalt (SHA-256) erkannt und nicht neu erkannt (OCR).
+  Der alte Eintrag einer umbenannten oder verschobenen Datei wird danach entfernt (prune_renamed).
 """
 from __future__ import annotations
 
@@ -240,8 +241,9 @@ class ScanStats:
     new: int = 0
     changed: int = 0
     restored: int = 0
-    missing: int = 0
+    missing: int = 0             # beim Durchgehen nicht mehr gefunden …
     missing_held_back: int = 0
+    renamed: int = 0             # … davon (oder von früher) nach dem Verarbeiten als umbenannt/verschoben erkannt
     unsupported: int = 0
     dir_errors: list[str] = field(default_factory=list)
 
@@ -832,6 +834,57 @@ def _process_parallel_run(con, todo, engine_name: str, workers: int, prog: _Prog
         prog.ps.interrupted = True
 
 
+# --- umbenannte und verschobene Dateien ----------------------------------------------------
+
+def _replaced_by(old: str, new: str) -> bool:
+    """Liegt `new` vor, und unter `old` nichts mehr – oder nur noch dieselbe Datei (gleiche Kennung, z. B. nach
+    reiner Änderung von Groß/Klein auf APFS)? Ein nicht lesbarer alter Pfad gilt nicht als frei."""
+    try:
+        n = os.lstat(new)
+    except OSError:
+        return False
+    try:
+        o = os.lstat(old)
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        return False
+    return (o.st_dev, o.st_ino) == (n.st_dev, n.st_ino)
+
+
+def prune_renamed(con, root_id: int, root_path: str, log: Callable[[str], None] = print) -> int:
+    """Einträge 'fehlt' entfernen, deren Datei nur umbenannt oder innerhalb des Ordners verschoben wurde.
+
+    Erst nach dem Verarbeiten aufrufen, wenn die SHA-256 der neuen Dateien feststehen. Umbenannt heißt: derselbe
+    Inhalt ist im selben Ordner unter einem anderen Pfad fertig eingelesen (Text übernommen), und unter dem alten
+    Pfad liegt wirklich nichts mehr. Nicht angefasst werden: fertig eingelesene Dubletten, fehlende Dateien ohne
+    Gegenstück und alles in einem Ordner, der nicht erreichbar oder leer ist (SSD abgezogen).
+    Rückgabe: Anzahl entfernter Einträge.
+    """
+    if _root_gone(root_path):
+        return 0
+    stale = con.execute("SELECT id, relpath, sha256 FROM files WHERE root_id = ? AND status = 'missing'"
+                        " AND sha256 IS NOT NULL ORDER BY relpath", (root_id,)).fetchall()
+    removed = 0
+    for m in stale:
+        # Gegenstück muss Seiten haben, wenn der alte Eintrag welche hat: nie Text wegwerfen, der sonst fehlt
+        for d in con.execute(
+                "SELECT d.relpath FROM files d WHERE d.root_id = ? AND d.sha256 = ? AND d.status = 'done'"
+                " AND (EXISTS (SELECT 1 FROM pages p WHERE p.file_id = d.id)"
+                " OR NOT EXISTS (SELECT 1 FROM pages p WHERE p.file_id = ?)) ORDER BY d.relpath",
+                (root_id, m["sha256"], m["id"])).fetchall():
+            if _replaced_by(os.path.join(root_path, m["relpath"]), os.path.join(root_path, d["relpath"])):
+                dbm.delete_search_rows(con, m["id"])
+                con.execute("DELETE FROM files WHERE id = ?", (m["id"],))   # Seiten per ON DELETE CASCADE
+                removed += 1
+                log(f"   umbenannt/verschoben: {m['relpath']} → {d['relpath']}")
+                break
+    if removed:
+        dbm.bump_generation(con)
+    con.commit()
+    return removed
+
+
 def run_index(con, folders: list[str], engine_name: str = "apple", confirm_missing: bool = False,
               limit: int | None = None, log: Callable[[str], None] = print, engine=None, workers: int = 1,
               retry: bool = False):
@@ -855,4 +908,7 @@ def run_index(con, folders: list[str], engine_name: str = "apple", confirm_missi
         log(f"{retried} Datei(en) mit Fehler werden erneut versucht.")
     ps = process_pending(con, engine_name, limit, log, engine, workers)
     ps.retried = retried
+    for r, s in zip(roots, scans):
+        if s.online:
+            s.renamed = prune_renamed(con, r["id"], r["path"], log)
     return scans, ps
