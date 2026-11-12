@@ -23,12 +23,22 @@ class ImageFormatError(Exception):
     """Bildformat nicht lesbar (weder Pillow noch macOS kann die Datei öffnen) – kein OCR-Problem."""
 
 
+def to_rgb(image: Image.Image) -> Image.Image:
+    """Transparente Vorlagen auf weißem Papier abbilden, statt unsichtbare RGB-Werte zu übernehmen."""
+    if "A" in image.getbands() or "transparency" in image.info:
+        rgba = image.convert("RGBA")
+        out = Image.new("RGB", image.size, "white")
+        out.paste(rgba, mask=rgba.getchannel("A"))
+        return out
+    return image.convert("RGB")
+
+
 def load_image(path: Path) -> Image.Image:
     """Bilddatei als RGB, EXIF-Drehung angewandt. Formate, die Pillow nicht kennt (HEIC), wandelt macOS
     `sips` in eine PNG-Datei im System-Temp-Ordner um – nie neben dem Original; sie wird danach gelöscht."""
     try:
         with Image.open(path) as im:
-            return ImageOps.exif_transpose(im).convert("RGB")
+            return to_rgb(ImageOps.exif_transpose(im))
     except UnidentifiedImageError:
         pass
     sips = shutil.which("sips") or "/usr/bin/sips"
@@ -45,7 +55,7 @@ def load_image(path: Path) -> Image.Image:
             raise ImageFormatError("Bildformat nicht lesbar" + (f" (sips: {errs[0][:200]})" if errs else ""))
         try:
             with Image.open(out) as im:
-                return ImageOps.exif_transpose(im).convert("RGB")
+                return to_rgb(ImageOps.exif_transpose(im))
         except Exception as e:
             raise ImageFormatError(f"Bildformat nicht lesbar ({e})") from e
 
@@ -117,7 +127,7 @@ class AppleVisionOCR:
         # PNG statt rohem TIFF/BMP: bei unkomprimierten Formaten gibt Vision den Speicher nicht
         # wieder frei (~60 MB je A4-Seite). compress_level=1 kostet nur einige ms.
         buf = io.BytesIO()
-        img.convert("RGB").save(buf, "PNG", compress_level=1)
+        to_rgb(img).save(buf, "PNG", compress_level=1)
         raw = buf.getvalue()
         del buf
         with objc.autorelease_pool():
@@ -151,7 +161,7 @@ class TesseractOCR:
 
     def recognize_image(self, img: Image.Image) -> OcrResult:
         buf = io.BytesIO()
-        img.convert("RGB").save(buf, "PNG")
+        to_rgb(img).save(buf, "PNG")
         proc = subprocess.run(
             [self.binary, "stdin", "stdout", "-l", self.languages, "--psm", "1", "tsv"],
             input=buf.getvalue(), capture_output=True, timeout=600,
@@ -181,6 +191,8 @@ class TesseractOCR:
 
 def enhance(img: Image.Image) -> Image.Image:
     """Zweiter Versuch für blasse oder kleine Vorlagen (Thermopapier, Handyfotos)."""
+    if "A" in img.getbands() or "transparency" in img.info:
+        img = to_rgb(img)
     g = ImageOps.grayscale(img)
     g = ImageOps.autocontrast(g, cutoff=2)
     if max(g.size) < 2500:

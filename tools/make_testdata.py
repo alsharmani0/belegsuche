@@ -5,11 +5,11 @@ Synthetischer deutscher Testkorpus für "belegsuche".
 
 Aufruf (aus dem Projektverzeichnis):
 
-    .venv/bin/python tools/make_testdata.py
+    .venv/bin/python tools/make_testdata.py --output /tmp/belegsuche-korpus
 
 Erzeugt deterministisch (fester Seed, reportlab mit invariant=1):
 
-    testdata/korpus/              Belegordner (wird bei jedem Lauf gelöscht und neu erzeugt)
+    testdata/korpus/              Belegordner (bestehender Ordner wird nicht überschrieben)
     testdata/manifest.json        ein Eintrag pro Datei inkl. Fakten pro Seite
     testdata/queries_dev.csv      Entwicklungs-Suchanfragen
     testdata/queries_holdout.csv  zurückgehaltene Suchanfragen (unabhängige Evaluation)
@@ -24,11 +24,11 @@ Benötigt: reportlab, pillow, pypdfium2 (im .venv) und das macOS-Tool `sips`
 """
 from __future__ import annotations
 
+import argparse
 import csv
 import hashlib
 import io
 import json
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -1946,9 +1946,9 @@ def heic_from_jpeg(jpg: bytes) -> bytes:
 
 
 def build() -> dict:
+    if KORPUS.exists() or KORPUS.is_symlink():
+        raise FileExistsError(f"Korpus existiert bereits: {KORPUS}. Ein neues --output DIR verwenden.")
     register_fonts()
-    if KORPUS.exists():
-        shutil.rmtree(KORPUS)
     KORPUS.mkdir(parents=True)
     entries = []
     by_path = {}
@@ -2287,9 +2287,23 @@ def write_readme(entries, dev_rows, hold_rows) -> None:
         "(Handwerker, Hauswart/Hausmeister, Stadtwerke, Versicherung, Schornsteinfeger, Anwalt,",
         "Kassenbons …) zum Testen von Indexierung, OCR und Suche.",
         "",
-        "Erzeugt mit `.venv/bin/python tools/make_testdata.py` (deterministisch, Seed "
-        f"{SEED}; `testdata/korpus/` wird bei jedem Lauf gelöscht und neu erzeugt).",
-        "Prüfen mit `.venv/bin/python tools/check_testdata.py` (Optionen: `--determinism`, `--ocr`, `--render DIR`).",
+        f"Generator: `.venv/bin/python tools/make_testdata.py` (Seed {SEED}).",
+        "Ein bestehender `korpus/`-Ordner wird nicht überschrieben. Ein frischer Checkout ohne diesen",
+        "Ordner kann mit dem Standardaufruf aufgebaut werden; dabei werden die Metadaten neu geschrieben.",
+        "Für einen getrennten Lauf mit anschließender Prüfung:",
+        "",
+        "```sh",
+        'corpus_dir=$(mktemp -d)',
+        '.venv/bin/python tools/make_testdata.py --output "$corpus_dir"',
+        '.venv/bin/python tools/check_testdata.py --testdata "$corpus_dir" --determinism',
+        "```",
+        "",
+        "`--output DIR` verlangt einen leeren oder noch nicht vorhandenen Zielordner. Der Checker liest",
+        "ohne `--testdata DIR` den veröffentlichten Bestand in `testdata/`. `--determinism` erzeugt zwei",
+        "getrennte temporäre Bestände und verändert den geprüften Bestand nicht. Byteidentität wird nur",
+        "für dieselbe Umgebung geprüft; Bibliotheks-, Schrift- und macOS/sips-Versionen können die Ausgabe ändern.",
+        "Weitere Prüfoptionen: `--ocr`, `--render DIR` und `--include-holdout` (siehe unten).",
+        "`--ocr` meldet die Wiedererkennung als Diagnose; es setzt keine feste Qualitätsgrenze durch.",
         "",
         "Alle Firmen, Personen, Adressen und Bankdaten sind erfunden. IBANs haben die Prüfziffer `00`",
         "(ungültig), Web/E-Mail nutzen die reservierte TLD `.example`.",
@@ -2331,6 +2345,9 @@ def write_readme(entries, dev_rows, hold_rows) -> None:
         "",
         "## manifest.json",
         "",
+        "In neu erzeugten Manifesten ist `korpus_root` relativ zur Manifestdatei (`korpus`).",
+        "Die Dokumentpfade sind relativ zu diesem Korpusordner.",
+        "",
         "Ein Eintrag pro Datei: `path` (relativ zu `korpus/`), `kind`, `pages`, `tags`, `readable`,",
         "`expected_error` (`encrypted`, `corrupt`, `unsupported`, `junk` oder `null`), `duplicate_of`,",
         "`sha256`, `size_bytes`, `params` (Degradierungsparameter), `password` (nur `encrypted_pdf`)",
@@ -2357,6 +2374,9 @@ def write_readme(entries, dev_rows, hold_rows) -> None:
         "**Die Holdout-Datei ist für eine unabhängige Evaluation reserviert:** Suche und Ranking werden",
         "nicht anhand dieser Anfragen abgestimmt. Sie zielt – bis auf TIFF und Sammel-PDF (andere Seiten) –",
         "auf andere Dokumente als die Dev-Datei.",
+        "Der Checker prüft beide CSVs auf Struktur und getrennte Zielseiten. Lexikalische Diagnosen und",
+        "querybezogene OCR-Ausgaben verwenden standardmäßig nur Dev; `--include-holdout` schaltet diese",
+        "Diagnosen auch für Holdout frei und gehört erst zur abschließenden Evaluation.",
         "",
         "Dubletten: Eine Dev-Anfrage zielt auf eine Datei mit byte-identischen Kopien; laut `notiz`",
         "zählt ein Treffer auf eine der Kopien ebenfalls als korrekt. Verschlüsselte, defekte und nicht",
@@ -2366,7 +2386,25 @@ def write_readme(entries, dev_rows, hold_rows) -> None:
     README.write_text("\n".join(lines), encoding="utf-8")
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    global TESTDATA, KORPUS, MANIFEST, DEV_CSV, HOLDOUT_CSV, README
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--output", type=Path, metavar="DIR", help="neuer oder leerer Ausgabeordner")
+    args = ap.parse_args(argv)
+    if args.output is not None:
+        output = args.output.expanduser().absolute()
+        if output.is_symlink() or (output.exists() and (not output.is_dir() or any(output.iterdir()))):
+            ap.error(f"Ausgabeordner ist nicht leer: {output}")
+    else:
+        output = ROOT / "testdata"
+    TESTDATA = output
+    KORPUS = TESTDATA / "korpus"
+    MANIFEST = TESTDATA / "manifest.json"
+    DEV_CSV = TESTDATA / "queries_dev.csv"
+    HOLDOUT_CSV = TESTDATA / "queries_holdout.csv"
+    README = TESTDATA / "README.md"
+    if KORPUS.exists() or KORPUS.is_symlink():
+        ap.error(f"Korpus existiert bereits: {KORPUS}. Ein neues --output DIR verwenden.")
     res = build()
     entries = res["entries"]
     loc = locate(entries)
@@ -2375,8 +2413,8 @@ def main() -> int:
     manifest = {
         "generator": "tools/make_testdata.py",
         "seed": SEED,
-        "korpus_root": "testdata/korpus",
-        "hinweis": "Alle Daten fiktiv. Pfade relativ zu korpus_root.",
+        "korpus_root": "korpus",
+        "hinweis": "Alle Daten fiktiv. korpus_root relativ zur Manifestdatei; Dokumentpfade relativ zu korpus_root.",
         "anzahl_dateien": len(entries),
         "documents": entries,
     }
@@ -2386,7 +2424,7 @@ def main() -> int:
     for e in entries:
         kinds[e["kind"]] = kinds.get(e["kind"], 0) + 1
     total = sum(e["size_bytes"] for e in entries)
-    print(f"{len(entries)} Dateien, {total / 1e6:.1f} MB in {KORPUS.relative_to(ROOT)}")
+    print(f"{len(entries)} Dateien, {total / 1e6:.1f} MB in {KORPUS}")
     for k, v in kinds.items():
         print(f"  {k:24s} {v}")
     print(f"Dev-Anfragen: {len(dev_rows)}  Holdout-Anfragen: {len(hold_rows)}")

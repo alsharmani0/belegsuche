@@ -14,7 +14,7 @@ from typing import Callable
 
 from PIL import Image, ImageOps
 
-from .ocr import ImageFormatError, OcrResult, enhance, load_image
+from .ocr import ImageFormatError, OcrResult, enhance, load_image, to_rgb
 
 PDF_EXT = {".pdf"}
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".heic", ".heif", ".bmp", ".gif", ".webp"}
@@ -95,9 +95,15 @@ def garbage_ratio(text: str) -> float:
     return bad / len(toks)
 
 
+def _odd_chars(text: str) -> int:
+    return sum(1 for c in text if not c.isspace()
+               and (c == "\ufffd" or unicodedata.category(c)[0] == "C"))
+
+
 def layer_is_clean(text: str) -> bool:
-    return _chars(text) >= MIN_TEXT_CHARS and text_quality(text) >= MIN_TEXT_QUALITY \
-        and garbage_ratio(text) <= MAX_GARBAGE_RATIO
+    n = _chars(text)
+    return n >= MIN_TEXT_CHARS and _odd_chars(text) <= 0.1 * n \
+        and text_quality(text) >= MIN_TEXT_QUALITY and garbage_ratio(text) <= MAX_GARBAGE_RATIO
 
 
 _ALNUM3_RE = re.compile(r"[^\W_]{3,}", re.UNICODE)
@@ -109,8 +115,7 @@ def layer_is_short_clean(text: str) -> bool:
     n = _chars(text)
     if not 0 < n < MIN_TEXT_CHARS or not _ALNUM3_RE.search(text):
         return False
-    odd = sum(1 for c in text if not c.isspace() and (c == "\ufffd" or unicodedata.category(c)[0] == "C"))
-    if odd > 0.1 * n or garbage_ratio(text) > MAX_GARBAGE_RATIO:
+    if _odd_chars(text) > 0.1 * n or garbage_ratio(text) > MAX_GARBAGE_RATIO:
         return False
     words = [t for t in _TOKEN_RE.findall(text) if len(t) >= 3]
     return not words or text_quality(text) >= MIN_TEXT_QUALITY
@@ -257,11 +262,13 @@ def extract_pdf(path: Path, engine) -> list[PageText]:
                 try:
                     boxes = _image_boxes(page, pdfium_c)
                 except Exception:
-                    boxes = []
+                    # Nicht auswertbare Bildobjekte sind kein Nachweis einer reinen
+                    # Textseite. Ganze Seite erkennen, damit eingebettete Belege nicht fehlen.
+                    boxes = None
                 # Textebene allein nur, wenn höchstens kleine Bilder auf der Seite liegen. Eingescannte
                 # Seiten (vorhandene Scanner-OCR ist oft schlecht) und große eingebettete Belegfotos werden
                 # ganz erkannt, kleinere Bilder (Belegfoto in ausgedruckter E-Mail, Firmenlogo) einzeln.
-                if clean and _coverage_of(boxes) <= OCR_COVERAGE:
+                if clean and boxes is not None and _coverage_of(boxes) <= OCR_COVERAGE:
                     crops = _crop_boxes(boxes, page.get_size()) if engine is not None else []
                     extra, conf = _ocr_crops(engine, _render(page), crops) if crops else ("", None)
                     if extra:
@@ -300,7 +307,7 @@ def _extract_frames(path: Path, engine, notes: list[str]) -> list[PageText]:
         for i in range(min(total, MAX_IMAGE_PAGES)):
             try:
                 im.seek(i)
-                frame = im.convert("RGB")
+                frame = to_rgb(im)
             except Exception as e:
                 raise ExtractError(f"Bild nicht lesbar (Seite {i + 1}: {e})") from e
             res = _best_ocr(engine, frame)
@@ -326,7 +333,11 @@ def extract_image(path: Path, engine, notes: list[str] | None = None) -> list[Pa
         err = e
     if res is None or res.chars < RETRY_BELOW_CHARS or res.confidence < RETRY_BELOW_CONF:
         try:
-            better = _best_ocr(engine, load_image(path))   # HEIC über sips, bekommt so auch den zweiten Versuch
+            image = load_image(path)     # HEIC bei Bedarf über sips
+            # Die Datei wurde bereits erkannt: gleich die verbesserte Fassung
+            # versuchen, statt dieselbe Vorlage ein zweites Mal zu erkennen.
+            better = (_best_ocr(engine, image) if res is None
+                      else engine.recognize_image(enhance(image)))
             if res is None or better.chars * max(better.confidence, 0.05) > res.chars * max(res.confidence, 0.05):
                 res = better
         except ImageFormatError as e:

@@ -39,6 +39,10 @@ jobs:
         if: always()
         shell: bash
         run: |
+          if [ ! -f pytest.log ]; then
+            echo "Kein Testprotokoll vorhanden; der Testschritt wurde nicht gestartet." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           skipped=$(grep '^SKIPPED' pytest.log 2>/dev/null || true)
           if [ -n "$skipped" ]; then
             n=$(printf '%s\n' "$skipped" | wc -l | tr -d ' ')

@@ -1,10 +1,14 @@
 .venv/
+.venv-alt/
+/build/
+/dist/
 __pycache__/
 *.egg-info/
 .pytest_cache/
 *.db
 *.db-wal
 *.db-shm
+*.db-journal
 testdata/korpus/
 .claude/
 .DS_Store

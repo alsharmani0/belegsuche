@@ -6,6 +6,9 @@ import os
 import signal
 import sqlite3
 import sys
+import tempfile
+from collections.abc import Callable
+from contextlib import closing, nullcontext
 from pathlib import Path
 
 from . import db as dbm
@@ -35,6 +38,14 @@ def _positive(v: str) -> int:
     return n
 
 
+def _eval_k(v: str) -> int:
+    from .evaluate import EVAL_LIMIT
+    n = _positive(v)
+    if n > EVAL_LIMIT:
+        raise argparse.ArgumentTypeError(f"höchstens {EVAL_LIMIT} Treffer werden ausgewertet")
+    return n
+
+
 def _safe(s: str) -> str:
     """Steuerzeichen aus Dateinamen/Texten nicht ans Terminal durchreichen."""
     return "".join(c if c.isprintable() or c in "\n\t" else repr(c)[1:-1] for c in str(s))
@@ -47,15 +58,54 @@ def _db(args) -> Path:
 def _require_db(args) -> Path | None:
     """Pfad eines vorhandenen Index – vorher ggf. auf das aktuelle Format umstellen (einmalig, meldet sich selbst)."""
     path = _db(args)
-    if not path.exists() or path.stat().st_size == 0:
+    if not path.is_file() or path.stat().st_size == 0:
         print(f"Noch kein Index vorhanden ({path}). Zuerst: belegsuche index <ordner>")
         return None
-    try:
-        dbm.connect(path).close()
-    except sqlite3.OperationalError as e:   # z. B. schreibgeschützter Ort: dann ohne Umstellung suchen
-        print(f"Hinweis: Index konnte nicht aktualisiert werden ({e}) – Suche läuft mit dem vorhandenen Stand.",
-              file=sys.stderr)
+    with closing(dbm.connect(path, readonly=True)) as con:
+        current = dbm.get_meta(con, "index_format") == dbm.INDEX_FORMAT
+    if not current:
+        try:
+            dbm.connect(path).close()
+        except sqlite3.OperationalError as e:
+            raise sqlite3.OperationalError(f"Indexformat konnte nicht aktualisiert werden: {e}") from e
     return path
+
+
+def _inside_folder(path: Path, root: Path) -> bool:
+    # Auch auf Dateisystemen mit unterschiedlichen Schreibweisen für denselben Ordner.
+    return path.is_relative_to(root.resolve()) or (
+        root.is_dir() and any(p.exists() and p.samefile(root) for p in path.parents))
+
+
+def _write_export(db_path: Path, destination: str, writer: Callable[[Path], None], *, source: Path | None = None):
+    """Bericht atomar ersetzen; weder SQLite-Dateien noch Quelldaten überschreiben."""
+    out = Path(destination).expanduser()
+    resolved = out.resolve()
+    if out.is_symlink():
+        raise OSError(f"Ausgabepfad ist ein symbolischer Link: {out}")
+    if out.exists() and not out.is_file():
+        raise OSError(f"Ausgabepfad ist keine normale Datei: {out}")
+    database = db_path.resolve()
+    protected = [database, *(Path(str(database) + ext) for ext in ("-wal", "-shm", "-journal"))]
+    if source is not None:
+        protected.append(source)
+    for p in protected:
+        if resolved == p.resolve() or (out.exists() and p.exists() and out.samefile(p)):
+            raise OSError(f"Ausgabedatei würde den Index oder die Eingabedatei überschreiben: {out}")
+    if out.exists():
+        with closing(dbm.connect(db_path, readonly=True)) as con:
+            roots = [Path(r[0]) for r in con.execute("SELECT path FROM roots")]
+        for root in roots:
+            if _inside_folder(resolved, root):
+                raise OSError(f"Vorhandene Datei im eingelesenen Ordner bleibt unverändert: {out}")
+    # Auch ein Hardlink auf ein Original außerhalb des Ausgabeordners wird dadurch nicht durchschrieben.
+    with tempfile.NamedTemporaryFile(dir=out.parent, prefix=".belegsuche-", delete=False) as tmp:
+        temp_path = Path(tmp.name)
+    try:
+        writer(temp_path)
+        temp_path.replace(out)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def _interrupt(signum, frame):
@@ -64,33 +114,46 @@ def _interrupt(signum, frame):
 
 
 def cmd_index(args) -> int:
-    from .indexer import acquire_lock, run_index
+    from .indexer import PERMANENT_ERRORS, acquire_lock, run_index
     path = _db(args)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lock = acquire_lock(path)  # noqa: F841  (hält die Sperre bis zum Ende des Laufs)
-    old = {sig: signal.signal(sig, _interrupt) for sig in (signal.SIGHUP, signal.SIGTERM)}
-    con = dbm.connect(path)
-    try:
-        scans, ps = run_index(con, args.ordner, engine_name=args.ocr, confirm_missing=args.fehlende_bestaetigen,
-                              limit=args.limit, workers=max(1, args.parallel), retry=args.fehler_wiederholen,
-                              log=lambda s: print(_safe(s)))
-    except KeyboardInterrupt:
-        print("\nUnterbrochen. Beim nächsten Start geht es an derselben Stelle weiter.")
-        return 130
-    finally:
-        for sig, handler in old.items():
-            signal.signal(sig, handler)
+    roots = [Path(p).expanduser() for p in args.ordner]
+    if path.is_file() and path.stat().st_size:
+        with closing(dbm.connect(path, readonly=True)) as existing:
+            roots.extend(Path(r[0]) for r in existing.execute("SELECT path FROM roots"))
+    if any(_inside_folder(path.resolve(), root) for root in roots):
+        raise OSError("Die Index-Datenbank muss außerhalb der eingelesenen Ordner liegen (--db).")
+    with acquire_lock(path):
+        old = {sig: signal.signal(sig, _interrupt) for sig in (signal.SIGHUP, signal.SIGTERM)}
+        try:
+            with closing(dbm.connect(path)) as con:
+                scans, ps = run_index(con, args.ordner, engine_name=args.ocr,
+                                      confirm_missing=args.fehlende_bestaetigen, limit=args.limit,
+                                      workers=max(1, args.parallel), retry=args.fehler_wiederholen,
+                                      log=lambda s: print(_safe(s)))
+                if ps.interrupted:
+                    return 130
+                # Eine bekannte beschädigte PDF lässt sich manuell erneut versuchen,
+                # soll aber nicht nach jedem unveränderten Lauf denselben Hinweis auslösen.
+                retryable = con.execute(
+                    "SELECT count(*) FROM files WHERE status='error' AND coalesce(error,'') NOT LIKE 'PDF beschädigt%'"
+                    f" AND coalesce(error,'') NOT IN ({','.join('?' for _ in PERMANENT_ERRORS)})",
+                    PERMANENT_ERRORS).fetchone()[0]
+        except KeyboardInterrupt:
+            print("\nUnterbrochen. Beim nächsten Start geht es an derselben Stelle weiter.")
+            return 130
+        finally:
+            for sig, handler in old.items():
+                signal.signal(sig, handler)
     print()
     print(f"Fertig: {ps.done} Dateien verarbeitet ({ps.reused} übernommen, {ps.ocr_pages} Seiten per Texterkennung), "
           f"{ps.errors} Fehler, {ps.seconds / 60:.1f} min.")
+    renamed = sum(s.renamed for s in scans)
+    if renamed:
+        print(f"umbenannt/verschoben: {renamed} (alte Einträge entfernt, Text übernommen)")
     if ps.skipped_offline:
         print(f"{ps.skipped_offline} Dateien warten auf einen nicht verbundenen Ordner.")
-    retryable = con.execute("SELECT count(*) FROM files WHERE status = 'error' AND error NOT LIKE 'PDF ist passwort%'"
-                            " AND error NOT LIKE 'PDF beschädigt%'").fetchone()[0]
     if retryable:
         print(f"{retryable} Datei(en) mit Fehler später erneut versuchen: belegsuche index --fehler-wiederholen")
-    if ps.interrupted:
-        return 130
     print("Überblick: belegsuche bericht   ·   Suchen: belegsuche start")
     return 0
 
@@ -136,11 +199,12 @@ def cmd_report(args) -> int:
     path = _require_db(args)
     if path is None:
         return 1
-    r = build_report(dbm.connect(path))
+    with closing(dbm.connect(path, readonly=True)) as con:
+        r = build_report(con)
     print(_safe(format_report(r)))
     if args.csv:
-        write_problems_csv(r, Path(args.csv))
-        print(f"\nProblemliste gespeichert: {args.csv}")
+        _write_export(path, args.csv, lambda output: write_problems_csv(r, output))
+        print(f"\nProblemliste gespeichert: {_safe(args.csv)}")
     return 0
 
 
@@ -161,20 +225,28 @@ def cmd_eval(args) -> int:
     results, summary = evaluate(Searcher(path), queries, k=args.k)
     print(_safe(format_eval(results, summary, k=args.k)))
     if args.json:
-        write_json(results, summary, Path(args.json))
+        _write_export(path, args.json, lambda output: write_json(results, summary, output), source=Path(args.datei))
     return 0
 
 
 def cmd_roots(args) -> int:
-    from .indexer import move_root
+    from .indexer import acquire_lock
     path = _require_db(args)
     if path is None:
         return 1
-    con = dbm.connect(path)
+    if args.aktion == "umziehen" and _inside_folder(path.resolve(), Path(args.neuer_pfad).expanduser()):
+        raise OSError("Der neue Ordner darf die Index-Datenbank nicht enthalten.")
+    mutate = args.aktion != "liste"
+    with (acquire_lock(path) if mutate else nullcontext()), closing(dbm.connect(path, readonly=not mutate)) as con:
+        return _roots_action(args, con)
+
+
+def _roots_action(args, con) -> int:
+    from .indexer import move_root
     if args.aktion == "umziehen":
         err = move_root(con, args.id, args.neuer_pfad)
         if err:
-            print(err)
+            print(_safe(err))
             return 1
         print(f"Ordner {args.id} zeigt jetzt auf {_safe(args.neuer_pfad)}. Danach: belegsuche index")
         return 0
@@ -234,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("test", parents=[common], help="Suchqualität mit einer Liste von Suchfragen messen")
     s.add_argument("datei", help="CSV mit Spalten suche;datei;seite;notiz")
-    s.add_argument("--k", type=int, default=5)
+    s.add_argument("--k", type=_eval_k, default=5, help="Ranggrenze für die Auswertung (Standard: 5)")
     s.add_argument("--json", help="Ergebnis zusätzlich als JSON speichern")
     s.set_defaults(func=cmd_eval)
 
@@ -249,7 +321,14 @@ def main(argv: list[str] | None = None) -> int:
         p.error("ordner umziehen/entfernen braucht eine ID (siehe: belegsuche ordner)")
     if args.cmd == "ordner" and args.aktion == "umziehen" and not args.neuer_pfad:
         p.error("ordner umziehen ID NEUER_PFAD")
-    return args.func(args)
+    if args.cmd == "ordner" and ((args.aktion == "liste" and args.id is not None)
+                                 or (args.aktion == "entfernen" and args.neuer_pfad is not None)):
+        p.error("unerwartete Argumente für ordner " + args.aktion)
+    try:
+        return args.func(args)
+    except (OSError, sqlite3.DatabaseError) as e:
+        print(f"Fehler bei {args.cmd}: {_safe(e)}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

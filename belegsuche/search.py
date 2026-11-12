@@ -33,7 +33,7 @@ from rapidfuzz import fuzz, process
 from rapidfuzz.distance import OSA
 
 from . import db as dbm
-from .normalize import (AMT, HN, ID, ID_SEP_RE, MO, WORD_RE, YR, _compact, amounts, date_spans, dates, fold,
+from .normalize import (AMT, HN, ID, ID_SEP_RE, MO, WORD_RE, YR, _compact, _integer_text, amounts, date_spans, dates, fold,
                         id_tokens_for, ids, is_decimal, street_head, words)
 from .synonyms import STOPWORDS, load_synonyms
 
@@ -347,7 +347,7 @@ def _address_alts(street: str, num: str, letter: str | None) -> dict[str, float]
 
 
 def _number_alts(t: str) -> dict[str, float]:
-    n = int(t)
+    n = _integer_text(t)
     if len(t) > 1 and t[0] == "0":         # führende Null ("00487"): Nummer, kein Betrag und kein Jahr
         alts = {t: 1.0}
         if len(t) >= 4:
@@ -355,7 +355,7 @@ def _number_alts(t: str) -> dict[str, float]:
             alts[f"{ID}{t}*"] = 0.6
         return alts
     alts = {t: 0.9 if len(t) >= 3 else 1.0}
-    if len(t) == 4 and 1900 <= n <= 2099:
+    if len(t) == 4 and 1900 <= int(t) <= 2099:
         alts[f"{YR}{t}"] = 1.0
     if len(t) >= 3:
         alts[f"{AMT}{n}"] = 1.0
@@ -394,14 +394,14 @@ def parse_query(query: str) -> list[Group]:
             q = _mask(q, cur.start(), cur.end())
     for m in _CUR_NUM_RE.finditer(q):       # "Euro 500": ein Betrag, "euro" ist kein eigener Suchbegriff
         num = m.group(1)
-        alts = {f"{AMT}{int(num.replace('.', ''))}": 1.0,
+        alts = {f"{AMT}{_integer_text(num.replace('.', ''))}": 1.0,
                 " ".join(words(m.group())): 1.0}      # so im Beleg geschrieben (dort nicht als Betrag erkannt)
         if num.isdigit():
             alts[num] = 0.9
         groups.append(Group(m.group().strip(), "amount", alts))
         q = _mask(q, m.start(), m.end())
     for m in _THOUSANDS_RE.finditer(q):     # "2.500" = Betrag (oder Nummer)
-        n = int(m.group(1).replace(".", ""))
+        n = _integer_text(m.group(1).replace(".", ""))
         groups.append(Group(m.group(1), "amount", {f"{AMT}{n}": 1.0, f"{ID}{n}": 0.9}))
         q = _mask(q, m.start(), m.end())
     for m in _GLUED_RE.finditer(q):         # "Mühlenstr.40" = Straße + Hausnummer
@@ -966,6 +966,7 @@ class Searcher:
         n_live = len(live)
         for fid, rids in by_file.items():
             srt = sorted(rids, key=lambda r: meta[r]["page_no"])
+            positions = {r: i for i, r in enumerate(srt)}
             # Seite beginnt einen neuen Beleg ("Seite 1 von 3"): Nachbarseiten davor gehören nicht dazu
             starts = {r for r in srt if any(m in pages[r][2] for m in DOC_START_MARKERS)}
             cands_p = []                     # (Fensterwert, eigener Wert, -Seite, rowid, Gewichte)
@@ -973,7 +974,7 @@ class Searcher:
                 pn = meta[r]["page_no"]
                 near = [q for q in srt[max(0, i - PAGE_WINDOW):i] + srt[i + 1:i + 1 + PAGE_WINDOW]
                         if abs(meta[q]["page_no"] - pn) <= PAGE_WINDOW
-                        and not any(x in starts for x in srt[min(i, srt.index(q)) + 1:max(i, srt.index(q)) + 1])]
+                        and not any(x in starts for x in srt[min(i, positions[q]) + 1:max(i, positions[q]) + 1])]
                 own = pages[r][0]
                 W = [max(own[k], OTHER_PAGE_FACTOR * max((pages[q][0][k] for q in near), default=0.0))
                      for k in range(n_live)]

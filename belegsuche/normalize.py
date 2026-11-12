@@ -98,8 +98,19 @@ def _valid_date(y: int, m: int, d: int | None) -> bool:
     return 1900 <= y <= 2099 and 1 <= m <= 12 and (d is None or 1 <= d <= 31)
 
 
+def _integer_text(digits: str) -> str:
+    """Dezimalziffern ohne führende Nullen, auch bei sehr langen OCR-/Nummernfolgen.
+
+    Dafür ist kein Python-Integer nötig; dessen Konvertierung ist ab einer gewissen
+    Ziffernzahl begrenzt und würde sonst das Einlesen des ganzen Dokuments abbrechen.
+    """
+    if not digits.isascii():
+        digits = "".join(str(unicodedata.decimal(c)) for c in digits)
+    return digits.lstrip("0") or "0"
+
+
 def amount_tokens(int_part: str, cents: str | None) -> list[str]:
-    n = int(re.sub(r"[.,\s   ]", "", int_part))
+    n = _integer_text(re.sub(r"[.,\s   ]", "", int_part))
     if cents is None or cents in ("-", "–"):
         cents = "00"
     elif len(cents) == 1:
@@ -115,7 +126,7 @@ def amounts(text: str) -> list[tuple[int, int, list[str]]]:
             out.append((m.start(), m.end(), amount_tokens(m.group(1), m.group(2))))
     for m in AMOUNT_INT_RE.finditer(text):
         num = m.group(1) or m.group(2)
-        out.append((m.start(), m.end(), [f"{AMT}{int(num.replace('.', ''))}"]))
+        out.append((m.start(), m.end(), [f"{AMT}{_integer_text(num.replace('.', ''))}"]))
     return out
 
 
@@ -241,7 +252,9 @@ def glued_parts(toks: list[str]) -> list[str]:
 HN = "0hn"   # Hausnummer an ihrer Straße: 0hnweg7 = "... Weg 7" (auch innerhalb von "Weg 7-11")
 STREET_SUFFIX = (r"(?:strasse|str|weg|allee|platz|ring|damm|gasse|chaussee|ufer|stieg|steig|twiete|kamp|redder|"
                  r"deich|pfad|wall|koppel|markt|berg|hof)")
-_HOUSE_RE = re.compile(rf"(?<![\w])([a-z]*{STREET_SUFFIX})\.?\s+(\d{{1,3}})(?:\s?[-–/,]\s?(\d{{1,3}}))?(?![\d])")
+_HOUSE_RE = re.compile(rf"(?<![\w])([a-z]*{STREET_SUFFIX})\.?\s+(\d{{1,3}})(?![\d])")
+_HOUSE_RANGE_RE = re.compile(r"\s?[-–/]\s?(\d{1,3})(?!\d)")
+_HOUSE_LIST_RE = re.compile(r"\s*,\s*(\d{1,3})(?!\d)")
 # Wort direkt vor einer allein stehenden Endung "Str."/"Straße" ("Muster Str. 12", "Muster-Straße 12")
 _STREET_HEAD_RE = re.compile(r"(?<![\w])([a-z]{3,})(?:\s+|\s?-\s?)$")
 
@@ -254,13 +267,28 @@ def street_head(folded: str, start: int) -> tuple[str, int] | None:
 
 
 def house_number_tokens(folded: str) -> list[str]:
-    """Straße + Hausnummer als ein Token; Bereiche/Aufzählungen ("7-11", "7/9", "9, 11") für jede Nummer darin."""
+    """Straße + Hausnummer als Token: Kommalisten einzeln, Bereiche höchstens 40 Nummern weiter.
+
+    Ein Schrägstrich wird aus Kompatibilität weiterhin wie ein Bereich behandelt ("7/9" -> 7, 8, 9).
+    """
     out = []
     for m in _HOUSE_RE.finditer(folded):
         street, a = m.group(1), int(m.group(2))
-        b = int(m.group(3)) if m.group(3) else a
-        if not (a <= b <= a + 40):
-            b = a
+        numbers = {a}
+        end = m.end()
+        while True:
+            span = _HOUSE_RANGE_RE.match(folded, end)
+            if span:
+                b = int(span.group(1))
+                if a <= b <= a + 40:
+                    numbers.update(range(a, b + 1))
+                end = span.end()
+            item = _HOUSE_LIST_RE.match(folded, end)
+            if not item:
+                break
+            a = int(item.group(1))
+            numbers.add(a)
+            end = item.end()
         variants = {street}
         if street in ("str", "strasse"):     # "Muster Str. 12" = "Musterstraße 12"
             head = street_head(folded, m.start(1))
@@ -271,7 +299,7 @@ def house_number_tokens(folded: str) -> list[str]:
                 variants.add(v[:-7] + "str")
             elif v.endswith("str"):
                 variants.add(v + "asse")
-        out += [f"{HN}{v}{n}" for v in variants for n in range(a, b + 1)]
+        out += [f"{HN}{v}{n}" for v in variants for n in numbers]
     return out
 
 

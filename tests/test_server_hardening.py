@@ -248,10 +248,9 @@ def test_serve_port_in_use_gives_hint(indexed, monkeypatch, capsys):
         s.listen()
         port = s.getsockname()[1]
         assert srv.serve(db_path, port=port, open_browser=True) == 1
-    url = f"http://127.0.0.1:{port}/"
     out = capsys.readouterr().out
-    assert f"Belegsuche läuft vermutlich schon: {url}" in out and "--port" in out
-    assert opened == [url]
+    assert f"Port {port} ist belegt" in out and "--port" in out
+    assert not opened  # Der fremde Listener ist nicht als unser Belegsuche-Index identifiziert.
 
 
 def test_serve_port_zero_uses_real_port(indexed, monkeypatch, capsys):

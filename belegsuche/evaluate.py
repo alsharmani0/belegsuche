@@ -16,11 +16,35 @@ import unicodedata
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .search import Searcher, _page_match
+from .search import Searcher, _group_score
+
+EVAL_LIMIT = 50
 
 
 def _norm(p: str) -> str:
     return unicodedata.normalize("NFC", p).replace("\\", "/").strip("/").casefold()
+
+
+def _page_number(value, context: str) -> int | None:
+    """Optionale Seitenzahl prüfen; Fehler dürfen die Seitenprüfung nicht still abschalten."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+        digits = value[1:] if value.startswith("+") else value
+        if digits.isdecimal():
+            try:
+                number = int(value)
+            except ValueError:
+                pass
+            else:
+                if number > 0:
+                    return number
+    elif type(value) is int and value > 0:
+        return value
+    raise ValueError(f"{context}: seite muss eine positive ganze Zahl ab 1 sein oder leer bleiben")
 
 
 def load_queries(path: Path) -> list[dict]:
@@ -35,9 +59,11 @@ def load_queries(path: Path) -> list[dict]:
             # Excel/Windows (cp1252) oder ältere Mac-Programme (MacRoman): die Kodierung mit mehr Umlauten gewinnt
             raw = max((data.decode(enc, errors="replace") for enc in ("cp1252", "mac_roman")),
                       key=lambda t: sum(t.count(c) for c in "äöüÄÖÜß"))
-    lines = raw.splitlines()
-    while lines and not lines[0].strip():
-        lines.pop(0)
+    lines = raw.splitlines(keepends=True)
+    skipped_lines = 0
+    while skipped_lines < len(lines) and not lines[skipped_lines].strip():
+        skipped_lines += 1
+    lines = lines[skipped_lines:]
     expected = "Erwartet Spalten suche;datei – gefunden: "
     if not lines:
         raise ValueError(expected + f"nichts ({path.name} ist leer)")
@@ -51,13 +77,28 @@ def load_queries(path: Path) -> list[dict]:
         header = [(k or "").strip() for k in reader.fieldnames or []]
         if not {"suche", "datei"} <= {h.lower() for h in header}:
             raise ValueError(expected + (", ".join(h for h in header if h) or "keine Spaltennamen"))
+        seen, duplicates = set(), set()
+        for name in (h.lower() for h in header if h):
+            if name in seen:
+                duplicates.add(name)
+            seen.add(name)
+        if duplicates:
+            raise ValueError(f"{path.name}, Zeile {reader.line_num + skipped_lines}: "
+                             f"Doppelte Spaltennamen: {', '.join(sorted(duplicates))}")
         for r in reader:
             extra = [(v or "").strip() for v in r.pop(None, None) or []]   # mehr Felder als Spalten
+            if not any((v or "").strip() for v in r.values()) and not any(extra):
+                continue                                                   # vollständig leere Zeilen
             r = {k.strip().lower(): (v or "").strip() for k, v in r.items() if k}
             if extra:                                                       # z. B. ';' in der Notiz
                 r["notiz"] = "; ".join(x for x in [r.get("notiz", ""), *extra] if x)
-            if r.get("suche") and r.get("datei"):
-                rows.append(r)
+            context = f"{path.name}, Zeile {reader.line_num + skipped_lines}"
+            missing = [name for name in ("suche", "datei") if not r.get(name)]
+            if missing:
+                raise ValueError(f"{context}: Jede Suchfrage braucht suche und datei "
+                                 f"(fehlt: {', '.join(missing)})")
+            _page_number(r.get("seite"), context)
+            rows.append(r)
     except csv.Error as e:
         raise ValueError(f"{path.name} ist keine lesbare CSV-Datei: {e}") from None
     if not rows:
@@ -128,7 +169,8 @@ def _diagnose_file(con, searcher: Searcher, query: str, entries: list) -> tuple[
     pages = con.execute("SELECT f.path, f.body FROM fts f JOIN pages p ON p.id = f.rowid WHERE p.file_id = ?",
                         (f["id"],)).fetchall()
     for g in live:
-        if not any(_page_match(g, set(r["body"].split()) | set(r["path"].split()), f" {r['body']} ")[0] > 0
+        if not any(_group_score(g, set(r["body"].split()), set(r["path"].split()),
+                                f" {r['body']} ", f" {r['path']} ")[0] > 0
                    for r in pages):
             missing.append(g.label)
     if missing and f["ocr_pages"]:
@@ -141,23 +183,22 @@ def _diagnose_file(con, searcher: Searcher, query: str, entries: list) -> tuple[
 
 
 def evaluate(searcher: Searcher, queries: list[dict], k: int = 5) -> tuple[list[EvalRow], dict]:
+    if not isinstance(k, int) or not 1 <= k <= EVAL_LIMIT:
+        raise ValueError(f"k muss zwischen 1 und {EVAL_LIMIT} liegen")
     results: list[EvalRow] = []
     con = searcher._connect()
     try:
         idx = _file_index(con)
         for q in queries:
+            want_page = _page_number(q.get("seite"), f"Suchfrage {len(results) + 1}")
             rows, err = _find(idx, q["datei"])
             rank, page = None, None
             if rows:
                 target = _norm(_full(rows[0]))
-                for i, h in enumerate(searcher.search(q["suche"], limit=50).hits, 1):
+                for i, h in enumerate(searcher.search(q["suche"], limit=EVAL_LIMIT).hits, 1):
                     if _matches(h, target):
                         rank, page = i, h.page_no
                         break
-            try:
-                want_page = int(q.get("seite") or 0) or None
-            except ValueError:
-                want_page = None
             if rank is not None and rank <= k:
                 cause, cat = "ok", "ok"
                 if want_page and page != want_page:

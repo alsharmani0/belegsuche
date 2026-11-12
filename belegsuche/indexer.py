@@ -6,6 +6,7 @@
 - Ist der Ordner (z. B. die SSD) nicht erreichbar, wird nichts als gelöscht markiert.
   Verschwindet er mitten im Lauf, wird angehalten; die offenen Dateien bleiben offen.
 - Verschobene oder doppelte Dateien werden am Inhalt (SHA-256) erkannt und nicht neu erkannt (OCR).
+  Der alte Eintrag einer umbenannten oder verschobenen Datei wird danach entfernt (prune_renamed).
 """
 from __future__ import annotations
 
@@ -14,7 +15,6 @@ import hashlib
 import os
 import sqlite3
 import stat
-import sys
 import time
 import unicodedata
 from dataclasses import dataclass, field
@@ -215,7 +215,12 @@ def acquire_lock(db_path: str | Path) -> IO:
     p = Path(db_path).expanduser()
     p.parent.mkdir(parents=True, exist_ok=True)
     real = Path(os.path.realpath(p))
-    real.touch(exist_ok=True)            # leere Datei ist für SQLite eine gültige neue Datenbank
+    try:
+        fd = os.open(real, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        pass                             # bestehende Dateien nicht einmal per touch verändern
+    else:
+        os.close(fd)                     # leere Datei ist für SQLite eine gültige neue Datenbank
     st = os.stat(real)
     lock_dir = Path(tempfile.gettempdir()) / "belegsuche-sperren"
     lock_dir.mkdir(exist_ok=True)
@@ -223,10 +228,10 @@ def acquire_lock(db_path: str | Path) -> IO:
     try:
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as e:
-        if e.errno not in (errno.EWOULDBLOCK, errno.EAGAIN):
-            return f   # Dateisystem ohne Sperren: ohne Sperre weiter
         f.close()
-        raise SystemExit("Einlesen läuft bereits (anderes Fenster?).")
+        if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+            raise SystemExit("Einlesen läuft bereits (anderes Fenster?).") from e
+        raise SystemExit(f"Sperre für den Index konnte nicht gesetzt werden: {e}") from e
     return f
 
 
@@ -240,10 +245,12 @@ class ScanStats:
     new: int = 0
     changed: int = 0
     restored: int = 0
-    missing: int = 0
+    missing: int = 0             # beim Durchgehen nicht mehr gefunden …
     missing_held_back: int = 0
+    renamed: int = 0             # … davon (oder von früher) nach dem Verarbeiten als umbenannt/verschoben erkannt
     unsupported: int = 0
     dir_errors: list[str] = field(default_factory=list)
+    _held_back_paths: set[str] = field(default_factory=set, repr=False)
 
 
 def _delete_fts_for_file(con, file_id: int) -> None:
@@ -278,14 +285,16 @@ def scan_root(con, root_id: int, root_path: str, confirm_missing: bool = False,
             if _ignored(name):
                 continue
             full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, root_path)
             try:
                 s = os.stat(full, follow_symlinks=False)
             except OSError as e:
                 st_.dir_errors.append(f"{full}: {e.strerror}")
+                # Ein aufgelisteter, vorübergehend nicht lesbarer Eintrag ist kein Löschungsnachweis.
+                seen.add(rel)
                 continue
             if not stat.S_ISREG(s.st_mode):
                 continue
-            rel = os.path.relpath(full, root_path)
             seen.add(rel)
             st_.seen += 1
             ext = os.path.splitext(name)[1].lower()
@@ -303,7 +312,7 @@ def scan_root(con, root_id: int, root_path: str, confirm_missing: bool = False,
                 else:
                     st_.new += 1
             else:
-                changed = row["size"] != s.st_size or abs((row["mtime"] or 0) - s.st_mtime) > 1e-3
+                changed = row["size"] != s.st_size or row["mtime"] != s.st_mtime
                 if kind == "unsupported":
                     con.execute("UPDATE files SET size=?, mtime=?, status='skipped', seen_at=? WHERE id=?",
                                 (s.st_size, s.st_mtime, now, row["id"]))
@@ -335,12 +344,14 @@ def scan_root(con, root_id: int, root_path: str, confirm_missing: bool = False,
     if gone and st_.seen == 0 and not confirm_missing:
         # Ordner ist da, aber leer: typischer leerer Einhängepunkt einer nicht angeschlossenen SSD
         st_.missing_held_back = len(gone)
+        st_._held_back_paths.update(r["relpath"] for r in gone)
         log(f"Achtung: {root_path} ist leer, bekannt sind {alive} Dateien – vermutlich ist die SSD nicht richtig "
             "angeschlossen. Nichts wurde als gelöscht markiert. Falls der Ordner wirklich geleert wurde: "
             "erneut mit --fehlende-bestaetigen starten.")
         gone = []
     if gone and alive >= 20 and len(gone) > MISSING_SAFETY_RATIO * alive and not confirm_missing:
         st_.missing_held_back = len(gone)
+        st_._held_back_paths.update(r["relpath"] for r in gone)
         log(f"Achtung: {len(gone)} von {alive} bekannten Dateien fehlen in {root_path}. "
             "Das sieht nach einem falschen oder unvollständigen Ordner aus – nichts wurde als gelöscht markiert. "
             "Falls die Dateien wirklich weg sind: erneut mit --fehlende-bestaetigen starten.")
@@ -400,7 +411,13 @@ class ProcessStats:
     seconds: float = 0.0
 
 
-def retry_errors(con, include_permanent: bool = False) -> int:
+def _root_scope(root_ids: list[int] | None, column: str = "root_id") -> tuple[str, tuple]:
+    if root_ids is None:
+        return "", ()
+    return f" AND {column} IN ({','.join('?' for _ in root_ids)})", tuple(root_ids)
+
+
+def retry_errors(con, include_permanent: bool = False, *, root_ids: list[int] | None = None) -> int:
     """Dateien mit Fehler wieder als offen markieren (z. B. nach abgezogener SSD oder OCR-Aussetzer).
 
     Ohne include_permanent bleiben Fehler stehen, bei denen Wiederholen nicht hilft (passwortgeschützt).
@@ -411,16 +428,20 @@ def retry_errors(con, include_permanent: bool = False) -> int:
     if not include_permanent:
         sql += f" AND coalesce(error, '') NOT IN ({','.join('?' * len(PERMANENT_ERRORS))})"
         args = PERMANENT_ERRORS
+    scope, root_args = _root_scope(root_ids)
+    sql += scope
+    args += root_args
     n = con.execute(sql, args).rowcount
     con.commit()
     return n
 
 
-def _reset_crashed(con) -> None:
+def _reset_crashed(con, root_ids: list[int] | None = None) -> None:
     """Dateien, bei denen ein früherer Lauf hart abgebrochen ist (Absturz, Strom weg)."""
+    scope, args = _root_scope(root_ids)
     con.execute("UPDATE files SET status='error', error='Programm ist bei dieser Datei mehrfach abgebrochen'"
-                " WHERE status='processing' AND attempts >= ?", (MAX_ATTEMPTS,))
-    con.execute("UPDATE files SET status='pending' WHERE status='processing'")
+                " WHERE status='processing' AND attempts >= ?" + scope, (MAX_ATTEMPTS, *args))
+    con.execute("UPDATE files SET status='pending' WHERE status='processing'" + scope, args)
     con.commit()
 
 
@@ -435,6 +456,14 @@ def _root_gone(root: str) -> bool:
 
 class _RootLost(Exception):
     """Der Ordner ist mitten im Lauf verschwunden."""
+
+
+class _ChangedDuringRead(Exception):
+    """Der Hash und die Texterkennung könnten zu verschiedenen Dateiständen gehören."""
+
+
+def _file_signature(s: os.stat_result) -> tuple:
+    return s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns
 
 
 def _prepare(con, r):
@@ -485,6 +514,9 @@ class _Progress:
 
     def finish(self, r, s, sha, pages: list[PageText], reused: bool, t0: float, note: str | None = None):
         con, ps = self.con, self.ps
+        current = os.stat(os.path.join(r["root"], r["relpath"]), follow_symlinks=False)
+        if not stat.S_ISREG(current.st_mode) or _file_signature(current) != _file_signature(s):
+            raise _ChangedDuringRead
         _write_pages(con, r["id"], r["relpath"], pages)
         ocr_pages = sum(1 for p in pages if p.source != "text")
         confs = [p.ocr_conf for p in pages if p.ocr_conf is not None]
@@ -516,7 +548,11 @@ class _Progress:
             # SSD abgezogen o. Ä.: kein Fehler der Datei – offen lassen und anhalten
             self.back_to_pending(r)
             raise _RootLost(r["root"])
-        if isinstance(e, FileNotFoundError):
+        if isinstance(e, _ChangedDuringRead):
+            self.back_to_pending(r)
+            self.log(f"[{self.i + 1}/{self.total}] {r['relpath']} – während des Lesens geändert, "
+                     "bleibt für den nächsten Lauf offen")
+        elif isinstance(e, FileNotFoundError):
             _delete_fts_for_file(con, r["id"])
             con.execute("UPDATE files SET status='missing' WHERE id=?", (r["id"],))
             self._changed()
@@ -543,10 +579,11 @@ class _Progress:
         self.log(msg)
 
 
-def _todo(con, ps: ProcessStats, limit: int | None):
+def _todo(con, ps: ProcessStats, limit: int | None, root_ids: list[int] | None = None):
+    scope, args = _root_scope(root_ids, "f.root_id")
     rows = con.execute(
         "SELECT f.id, f.relpath, f.sha256, f.attempts, r.path AS root FROM files f JOIN roots r ON r.id = f.root_id"
-        " WHERE f.status = 'pending' ORDER BY r.id, f.relpath").fetchall()
+        " WHERE f.status = 'pending'" + scope + " ORDER BY r.id, f.relpath", args).fetchall()
     online: dict[str, bool] = {}
     todo = []
     for r in rows:
@@ -560,12 +597,13 @@ def _todo(con, ps: ProcessStats, limit: int | None):
 
 
 def process_pending(con, engine_name: str = "apple", limit: int | None = None,
-                    log: Callable[[str], None] = print, engine=None, workers: int = 1) -> ProcessStats:
+                    log: Callable[[str], None] = print, engine=None, workers: int = 1,
+                    *, root_ids: list[int] | None = None) -> ProcessStats:
     """Verarbeitet alle offenen Dateien. `workers` > 1: Texterkennung in mehreren Prozessen parallel."""
     ps = ProcessStats()
     t_start = time.time()
-    _reset_crashed(con)
-    todo = _todo(con, ps, limit)
+    _reset_crashed(con, root_ids)
+    todo = _todo(con, ps, limit, root_ids)
     prog = _Progress(con, ps, len(todo), log)
     if todo:
         if workers > 1 and engine is None:
@@ -689,9 +727,9 @@ def _make_pool(engine_name: str, workers: int):
     import multiprocessing as mp
     from concurrent.futures import ProcessPoolExecutor
     _start_resource_tracker()
-    kw = {"max_tasks_per_child": MAX_TASKS_PER_WORKER} if sys.version_info >= (3, 11) else {}
     return ProcessPoolExecutor(workers, mp_context=mp.get_context("spawn"),
-                               initializer=_init_worker, initargs=(engine_name,), **kw)
+                               initializer=_init_worker, initargs=(engine_name,),
+                               max_tasks_per_child=MAX_TASKS_PER_WORKER)
 
 
 def _kill_pool(pool) -> None:
@@ -741,12 +779,12 @@ def _process_parallel_run(con, todo, engine_name: str, workers: int, prog: _Prog
                 current, t0 = r, time.time()
                 try:
                     s, sha, pages, reused, note = _prepare(con, r)
+                    if pages is not None:
+                        prog.finish(r, s, sha, pages, reused, t0, note)
+                        current = None
+                        continue
                 except Exception as e:
                     prog.fail(r, e)
-                    current = None
-                    continue
-                if pages is not None:
-                    prog.finish(r, s, sha, pages, reused, t0, note)
                     current = None
                     continue
                 if sha in inflight_sha:
@@ -772,6 +810,7 @@ def _process_parallel_run(con, todo, engine_name: str, workers: int, prog: _Prog
                 solo_running = False
             crashed = []
             for fut in done:
+                current = inflight[fut][0]   # vor dem pop festhalten: Abbruch kann jederzeit eintreffen
                 r, s, sha, t0 = inflight.pop(fut)
                 inflight_sha.discard(sha)
                 try:
@@ -781,6 +820,7 @@ def _process_parallel_run(con, todo, engine_name: str, workers: int, prog: _Prog
                     crashed.append(r)
                 except Exception as e:
                     prog.fail(r, e)
+                current = None
             if crashed:
                 # Ein Prozess ist abgestürzt: alle laufenden Dateien sind betroffen
                 for fut, (r, s, sha, t0) in list(inflight.items()):
@@ -832,6 +872,63 @@ def _process_parallel_run(con, todo, engine_name: str, workers: int, prog: _Prog
         prog.ps.interrupted = True
 
 
+# --- umbenannte und verschobene Dateien ----------------------------------------------------
+
+def _replaced_by(old: str, new: str) -> bool:
+    """Liegt `new` vor, und unter `old` nichts mehr – oder nur noch dieselbe Datei (gleiche Kennung, z. B. nach
+    reiner Änderung von Groß/Klein auf APFS)? Ein nicht lesbarer alter Pfad gilt nicht als frei."""
+    try:
+        n = os.lstat(new)
+    except OSError:
+        return False
+    try:
+        o = os.lstat(old)
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        return False
+    return (o.st_dev, o.st_ino) == (n.st_dev, n.st_ino)
+
+
+def prune_renamed(con, root_id: int, root_path: str, log: Callable[[str], None] = print,
+                  *, held_back_paths: set[str] | None = None) -> int:
+    """Einträge 'fehlt' entfernen, deren Datei nur umbenannt oder innerhalb des Ordners verschoben wurde.
+
+    Erst nach dem Verarbeiten aufrufen, wenn die SHA-256 der neuen Dateien feststehen. Umbenannt heißt: derselbe
+    Inhalt ist im selben Ordner unter einem anderen Pfad fertig eingelesen (Text übernommen), und unter dem alten
+    Pfad liegt wirklich nichts mehr. Nicht angefasst werden: fertig eingelesene Dubletten, fehlende Dateien ohne
+    Gegenstück und alles in einem Ordner, der nicht erreichbar oder leer ist (SSD abgezogen).
+    Bei Massenumbenennungen stehen die alten Pfade wegen der Löschsicherung noch auf 'done';
+    nur diese ausdrücklich zurückgehaltenen Pfade dürfen ebenfalls auf ein Gegenstück geprüft werden.
+    Rückgabe: Anzahl entfernter Einträge.
+    """
+    if _root_gone(root_path):
+        return 0
+    statuses = "('missing', 'done')" if held_back_paths else "('missing')"
+    stale = con.execute(f"SELECT id, relpath, sha256, status FROM files WHERE root_id = ? AND status IN {statuses}"
+                        " AND sha256 IS NOT NULL ORDER BY relpath", (root_id,)).fetchall()
+    removed = 0
+    for m in stale:
+        if m["status"] != "missing" and m["relpath"] not in held_back_paths:
+            continue
+        # Gegenstück muss Seiten haben, wenn der alte Eintrag welche hat: nie Text wegwerfen, der sonst fehlt
+        for d in con.execute(
+                "SELECT d.relpath FROM files d WHERE d.root_id = ? AND d.sha256 = ? AND d.status = 'done' AND d.id != ?"
+                " AND (EXISTS (SELECT 1 FROM pages p WHERE p.file_id = d.id)"
+                " OR NOT EXISTS (SELECT 1 FROM pages p WHERE p.file_id = ?)) ORDER BY d.relpath",
+                (root_id, m["sha256"], m["id"], m["id"])).fetchall():
+            if _replaced_by(os.path.join(root_path, m["relpath"]), os.path.join(root_path, d["relpath"])):
+                dbm.delete_search_rows(con, m["id"])
+                con.execute("DELETE FROM files WHERE id = ?", (m["id"],))   # Seiten per ON DELETE CASCADE
+                removed += 1
+                log(f"   umbenannt/verschoben: {m['relpath']} → {d['relpath']}")
+                break
+    if removed:
+        dbm.bump_generation(con)
+    con.commit()
+    return removed
+
+
 def run_index(con, folders: list[str], engine_name: str = "apple", confirm_missing: bool = False,
               limit: int | None = None, log: Callable[[str], None] = print, engine=None, workers: int = 1,
               retry: bool = False):
@@ -850,9 +947,13 @@ def run_index(con, folders: list[str], engine_name: str = "apple", confirm_missi
                 f"{s.missing} fehlen, {s.unsupported} nicht unterstützt")
         for e in s.dir_errors[:10]:
             log(f"   nicht lesbar: {e}")
-    retried = retry_errors(con) if retry else 0
+    scope = ids if folders else None
+    retried = retry_errors(con, root_ids=scope) if retry else 0
     if retried:
         log(f"{retried} Datei(en) mit Fehler werden erneut versucht.")
-    ps = process_pending(con, engine_name, limit, log, engine, workers)
+    ps = process_pending(con, engine_name, limit, log, engine, workers, root_ids=scope)
     ps.retried = retried
+    for r, s in zip(roots, scans):
+        if s.online:
+            s.renamed = prune_renamed(con, r["id"], r["path"], log, held_back_paths=s._held_back_paths)
     return scans, ps

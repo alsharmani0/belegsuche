@@ -4,7 +4,7 @@
 Validiert den Testkorpus (testdata/) gegen manifest.json und die Query-CSVs.
 
     .venv/bin/python tools/check_testdata.py                  # Struktur-, Text- und CSV-Prüfungen
-    .venv/bin/python tools/check_testdata.py --determinism    # zusätzlich: Generator 2x laufen lassen, Hashes vergleichen
+    .venv/bin/python tools/check_testdata.py --determinism    # zusätzlich: Generator 2x isoliert ausführen
     .venv/bin/python tools/check_testdata.py --ocr            # zusätzlich: Bildbelege mit Apple Vision prüfen
     .venv/bin/python tools/check_testdata.py --render DIR     # zusätzlich: einige Scans als PNG nach DIR rendern
 
@@ -62,8 +62,15 @@ def pdf_text(path: Path, password=None) -> list[str]:
     try:
         out = []
         for i in range(len(pdf)):
-            tp = pdf[i].get_textpage()
-            out.append(tp.get_text_range())
+            page = pdf[i]
+            try:
+                tp = page.get_textpage()
+                try:
+                    out.append(tp.get_text_range())
+                finally:
+                    tp.close()
+            finally:
+                page.close()
         return out
     finally:
         pdf.close()
@@ -87,21 +94,54 @@ def contains_ws(hay: str, needle: str) -> bool:
 
 def check_files(man: dict) -> dict[str, dict]:
     print("== Dateien / Manifest")
-    docs = {d["path"]: d for d in man["documents"]}
+    docs = {}
+    for d in man["documents"]:
+        p = d["path"]
+        rel = Path(p)
+        if not p or rel.is_absolute() or ".." in rel.parts or rel.as_posix() != p:
+            fail(f"ungültiger Manifest-Pfad: {p!r}")
+            continue
+        if any((KORPUS / Path(*rel.parts[:i])).is_symlink() for i in range(len(rel.parts) + 1)):
+            fail(f"Symlink im Manifest-Pfad: {p}")
+            continue
+        if p in docs:
+            fail(f"Manifest-Pfad mehrfach vorhanden: {p}")
+            continue
+        if d["kind"] not in {"digital_pdf", "scan_pdf", "garbage_textlayer_pdf", "sammel_pdf",
+                              "encrypted_pdf", "corrupt_pdf", "photo_jpg", "png", "tiff_multipage",
+                              "heic", "unsupported", "duplicate_of"}:
+            fail(f"unbekannter Dateityp im Manifest: {p}")
+            continue
+        docs[p] = d
+    if man.get("anzahl_dateien") != len(man["documents"]):
+        fail("anzahl_dateien stimmt nicht mit documents überein")
     on_disk = {str(p.relative_to(KORPUS)) for p in KORPUS.rglob("*") if p.is_file()}
     for p in sorted(on_disk - set(docs)):
         fail(f"Datei nicht im Manifest: {p}")
     for p, d in docs.items():
         fp = KORPUS / p
-        if not fp.exists():
+        if not fp.is_file():
             fail(f"fehlt: {p}")
             continue
-        h = hashlib.sha256(fp.read_bytes()).hexdigest()
+        data = fp.read_bytes()
+        h = hashlib.sha256(data).hexdigest()
         if h != d["sha256"]:
             fail(f"sha256 weicht ab: {p}")
+        if len(data) != d["size_bytes"]:
+            fail(f"size_bytes weicht ab: {p}")
         if d["kind"] == "duplicate_of":
-            if docs[d["duplicate_of"]]["sha256"] != h:
+            original = docs.get(d["duplicate_of"])
+            if original is None or original["kind"] == "duplicate_of" or d["duplicate_of"] == p:
+                fail(f"ungültiges Dubletten-Ziel: {p}")
+            elif original["sha256"] != h:
                 fail(f"Dublette nicht byte-identisch: {p}")
+        if not isinstance(d["pages"], int) or isinstance(d["pages"], bool) or d["pages"] < 0:
+            fail(f"ungültige Seitenzahl: {p}")
+            continue
+        for f in d["facts"]:
+            s = f["seite"]
+            if not isinstance(s, int) or isinstance(s, bool) or not 1 <= s <= d["pages"]:
+                fail(f"Faktenseite außerhalb des Dokuments: {p}")
     seen_amount, seen_nr = {}, {}
     for p, d in docs.items():
         if d["kind"] == "duplicate_of":
@@ -121,11 +161,15 @@ def check_pdfs(docs: dict[str, dict]) -> None:
     for p, d in docs.items():
         k = d["kind"]
         fp = KORPUS / p
+        if not fp.is_file():
+            continue  # Bereits als fehlend gemeldet; übrige Prüfungen bleiben ausführbar.
         if k in ("digital_pdf", "scan_pdf", "garbage_textlayer_pdf", "sammel_pdf"):
             texts = pdf_text(fp)
             if len(texts) != d["pages"]:
                 fail(f"{p}: {len(texts)} Seiten, Manifest sagt {d['pages']}")
             for f in d["facts"]:
+                if not isinstance(f["seite"], int) or not 1 <= f["seite"] <= len(texts):
+                    continue
                 t = texts[f["seite"] - 1]
                 if f["quelle"] == "textlayer":
                     for name, needle in fact_needles(f).items():
@@ -168,11 +212,12 @@ def check_pdfs(docs: dict[str, dict]) -> None:
             except pdfium.PdfiumError:
                 pass
         elif k in ("photo_jpg", "png"):
-            Image.open(fp).verify()
+            with Image.open(fp) as im:
+                im.verify()
         elif k == "tiff_multipage":
-            im = Image.open(fp)
-            if im.n_frames != d["pages"]:
-                fail(f"{p}: {im.n_frames} Frames statt {d['pages']}")
+            with Image.open(fp) as im:
+                if im.n_frames != d["pages"]:
+                    fail(f"{p}: {im.n_frames} Frames statt {d['pages']}")
         elif k == "heic":
             r = subprocess.run(["sips", "-g", "pixelWidth", "-g", "format", str(fp)], capture_output=True, text=True)
             if "heic" not in r.stdout:
@@ -184,10 +229,37 @@ def read_csv(path: Path) -> list[dict]:
     raw = path.read_bytes()
     if raw.startswith(b"\xef\xbb\xbf"):
         fail(f"{path.name}: BOM vorhanden")
-    text = raw.decode("utf-8")
-    if text.splitlines()[0] != "suche;datei;seite;notiz":
-        fail(f"{path.name}: Kopfzeile falsch: {text.splitlines()[0]!r}")
-    return list(csv.DictReader(io.StringIO(text), delimiter=";"))
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        fail(f"{path.name}: kein gültiges UTF-8")
+        return []
+    lines = text.splitlines()
+    if not lines or lines[0] != "suche;datei;seite;notiz":
+        fail(f"{path.name}: Kopfzeile fehlt oder ist falsch")
+        return []
+    rows = []
+    try:
+        reader = csv.DictReader(io.StringIO(text), delimiter=";", strict=True)
+        for row in reader:
+            if None in row or any(v is None or not v.strip() for v in row.values()):
+                fail(f"{path.name} Zeile {reader.line_num}: fehlende oder zusätzliche Felder")
+                continue
+            try:
+                page = int(row["seite"])
+            except ValueError:
+                fail(f"{path.name} Zeile {reader.line_num}: Seite ist keine ganze Zahl")
+                continue
+            if page < 1:
+                fail(f"{path.name} Zeile {reader.line_num}: Seite muss positiv sein")
+                continue
+            row["seite"] = str(page)
+            rows.append(row)
+    except csv.Error as exc:
+        fail(f"{path.name}: ungültiges CSV: {exc}")
+    if not rows:
+        fail(f"{path.name}: keine gültigen Anfragen")
+    return rows
 
 
 def doc_texts() -> dict[str, str]:
@@ -224,10 +296,10 @@ def check_queries(docs: dict[str, dict]) -> dict[str, list[dict]]:
     hold = {(r["datei"], r["seite"]) for r in sets["queries_holdout.csv"]}
     if dev & hold:
         fail(f"Dev und Holdout teilen Ziele: {dev & hold}")
-    dq = {r["suche"].lower() for r in sets["queries_dev.csv"]}
-    hq = {r["suche"].lower() for r in sets["queries_holdout.csv"]}
+    dq = {" ".join(r["suche"].casefold().split()) for r in sets["queries_dev.csv"]}
+    hq = {" ".join(r["suche"].casefold().split()) for r in sets["queries_holdout.csv"]}
     if dq & hq:
-        fail(f"identische Suchstrings in Dev und Holdout: {dq & hq}")
+        fail(f"{len(dq & hq)} identische Suchstrings in Dev und Holdout")
     return sets
 
 
@@ -385,13 +457,15 @@ def render_samples(docs, outdir: Path) -> None:
 
 def check_determinism() -> None:
     print("== Determinismus (Generator 2x)")
-    gen = [sys.executable, str(ROOT / "tools" / "make_testdata.py")]
     snaps = []
-    for _ in range(2):
-        subprocess.run(gen, check=True, capture_output=True)
-        snap = {str(p.relative_to(TESTDATA)): hashlib.sha256(p.read_bytes()).hexdigest()
-                for p in TESTDATA.rglob("*") if p.is_file()}
-        snaps.append(snap)
+    with tempfile.TemporaryDirectory(prefix="belegsuche-determinism-") as td:
+        for run in range(2):
+            output = Path(td) / str(run)
+            gen = [sys.executable, str(ROOT / "tools" / "make_testdata.py"), "--output", str(output)]
+            subprocess.run(gen, check=True, capture_output=True)
+            snap = {str(p.relative_to(output)): hashlib.sha256(p.read_bytes()).hexdigest()
+                    for p in output.rglob("*") if p.is_file()}
+            snaps.append(snap)
     a, b = snaps
     if set(a) != set(b):
         fail(f"Dateiliste unterschiedlich: {set(a) ^ set(b)}")
@@ -401,24 +475,35 @@ def check_determinism() -> None:
     print(f"  {len(a)} Dateien verglichen, {len(diff)} Abweichungen")
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    global TESTDATA, KORPUS
+    FAILS.clear()
     ap = argparse.ArgumentParser()
+    ap.add_argument("--testdata", type=Path, default=ROOT / "testdata", metavar="DIR")
     ap.add_argument("--determinism", action="store_true")
     ap.add_argument("--ocr", action="store_true")
     ap.add_argument("--render", metavar="DIR")
     ap.add_argument("-v", "--verbose", action="store_true")
-    a = ap.parse_args()
-    if a.determinism:
-        check_determinism()
-    man = json.loads((TESTDATA / "manifest.json").read_text(encoding="utf-8"))
-    docs = check_files(man)
-    check_pdfs(docs)
-    sets = check_queries(docs)
-    ambiguity_report(docs, sets, a.verbose)
-    if a.render:
-        render_samples(docs, Path(a.render))
-    if a.ocr:
-        check_ocr(docs, sets)
+    ap.add_argument("--include-holdout", action="store_true", help="auch Holdout-Anfragen in Inhaltsdiagnosen zeigen")
+    a = ap.parse_args(argv)
+    TESTDATA = a.testdata.expanduser().absolute()
+    KORPUS = TESTDATA / "korpus"
+    try:
+        if a.determinism:
+            check_determinism()
+        man = json.loads((TESTDATA / "manifest.json").read_text(encoding="utf-8"))
+        docs = check_files(man)
+        check_pdfs(docs)
+        sets = check_queries(docs)
+        diagnostic_sets = sets if a.include_holdout else {"queries_dev.csv": sets["queries_dev.csv"]}
+        ambiguity_report(docs, diagnostic_sets, a.verbose)
+        if a.render:
+            render_samples(docs, Path(a.render))
+        if a.ocr:
+            check_ocr(docs, diagnostic_sets)
+    except (OSError, ValueError, KeyError, IndexError, TypeError, pdfium.PdfiumError,
+            subprocess.CalledProcessError) as exc:
+        fail(f"Prüfung nicht ausführbar: {exc}")
     print()
     print("ERGEBNIS:", "OK" if not FAILS else f"{len(FAILS)} Fehler")
     return 1 if FAILS else 0

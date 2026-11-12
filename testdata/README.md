@@ -4,8 +4,23 @@ Synthetischer, vollständig **fiktiver** Korpus deutscher Hausverwaltungs- und H
 (Handwerker, Hauswart/Hausmeister, Stadtwerke, Versicherung, Schornsteinfeger, Anwalt,
 Kassenbons …) zum Testen von Indexierung, OCR und Suche.
 
-Erzeugt mit `.venv/bin/python tools/make_testdata.py` (deterministisch, Seed 20260924; `testdata/korpus/` wird bei jedem Lauf gelöscht und neu erzeugt).
-Prüfen mit `.venv/bin/python tools/check_testdata.py` (Optionen: `--determinism`, `--ocr`, `--render DIR`).
+Generator: `.venv/bin/python tools/make_testdata.py` (Seed 20260924).
+Ein bestehender `korpus/`-Ordner wird nicht überschrieben. Ein frischer Checkout ohne diesen
+Ordner kann mit dem Standardaufruf aufgebaut werden; dabei werden die Metadaten neu geschrieben.
+Für einen getrennten Lauf mit anschließender Prüfung:
+
+```sh
+corpus_dir=$(mktemp -d)
+.venv/bin/python tools/make_testdata.py --output "$corpus_dir"
+.venv/bin/python tools/check_testdata.py --testdata "$corpus_dir" --determinism
+```
+
+`--output DIR` verlangt einen leeren oder noch nicht vorhandenen Zielordner. Der Checker liest
+ohne `--testdata DIR` den veröffentlichten Bestand in `testdata/`. `--determinism` erzeugt zwei
+getrennte temporäre Bestände und verändert den geprüften Bestand nicht. Byteidentität wird nur
+für dieselbe Umgebung geprüft; Bibliotheks-, Schrift- und macOS/sips-Versionen können die Ausgabe ändern.
+Weitere Prüfoptionen: `--ocr`, `--render DIR` und `--include-holdout` (siehe unten).
+`--ocr` meldet die Wiedererkennung als Diagnose; es setzt keine feste Qualitätsgrenze durch.
 
 Alle Firmen, Personen, Adressen und Bankdaten sind erfunden. IBANs haben die Prüfziffer `00`
 (ungültig), Web/E-Mail nutzen die reservierte TLD `.example`.
@@ -89,6 +104,9 @@ Alle Firmen, Personen, Adressen und Bankdaten sind erfunden. IBANs haben die Pr�
 
 ## manifest.json
 
+In neu erzeugten Manifesten ist `korpus_root` relativ zur Manifestdatei (`korpus`).
+Die Dokumentpfade sind relativ zu diesem Korpusordner.
+
 Ein Eintrag pro Datei: `path` (relativ zu `korpus/`), `kind`, `pages`, `tags`, `readable`,
 `expected_error` (`encrypted`, `corrupt`, `unsupported`, `junk` oder `null`), `duplicate_of`,
 `sha256`, `size_bytes`, `params` (Degradierungsparameter), `password` (nur `encrypted_pdf`)
@@ -113,6 +131,9 @@ Einzelseiten immer 1). `notiz` beginnt mit der Kategorie: `exakt`, `name`, `besc
 **Die Holdout-Datei ist für eine unabhängige Evaluation reserviert:** Suche und Ranking werden
 nicht anhand dieser Anfragen abgestimmt. Sie zielt – bis auf TIFF und Sammel-PDF (andere Seiten) –
 auf andere Dokumente als die Dev-Datei.
+Der Checker prüft beide CSVs auf Struktur und getrennte Zielseiten. Lexikalische Diagnosen und
+querybezogene OCR-Ausgaben verwenden standardmäßig nur Dev; `--include-holdout` schaltet diese
+Diagnosen auch für Holdout frei und gehört erst zur abschließenden Evaluation.
 
 Dubletten: Eine Dev-Anfrage zielt auf eine Datei mit byte-identischen Kopien; laut `notiz`
 zählt ein Treffer auf eine der Kopien ebenfalls als korrekt. Verschlüsselte, defekte und nicht

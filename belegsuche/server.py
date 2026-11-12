@@ -85,6 +85,7 @@ def make_handler(searcher: Searcher, port: int):
             self.send_header("Content-Security-Policy", self._csp)
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+            self.send_header("Cache-Control", "no-store")
             self._sent = True
             super().end_headers()
 
@@ -115,7 +116,6 @@ def make_handler(searcher: Searcher, port: int):
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
 
@@ -159,7 +159,6 @@ def make_handler(searcher: Searcher, port: int):
                 self.send_response(200)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
-                self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(body)
             elif url.path == "/api/search":
@@ -184,7 +183,12 @@ def make_handler(searcher: Searcher, port: int):
                 try:
                     roots = [{"path": r["path"], "online": os.path.isdir(r["path"])}
                              for r in con.execute("SELECT path FROM roots ORDER BY id")]
-                    done = con.execute("SELECT count(*) FROM files WHERE status = 'done'").fetchone()[0]
+                    # Geänderte Dateien behalten bis zum erneuten Einlesen ihren Suchtext.
+                    # Neue Dateien ohne Seiten sind dagegen noch nicht durchsuchbar.
+                    done = con.execute(
+                        f"SELECT count(*) FROM files f WHERE f.status IN {dbm.SEARCHABLE_SQL}"
+                        " AND EXISTS (SELECT 1 FROM pages p WHERE p.file_id = f.id)"
+                    ).fetchone()[0]
                 finally:
                     con.close()
                 self._json({"roots": roots, "files": done})
@@ -255,24 +259,27 @@ def serve(db_path: Path, port: int = 8765, open_browser: bool = True) -> int:
         httpd = ThreadingHTTPServer(("127.0.0.1", port), None)
     except (OSError, OverflowError) as e:
         if getattr(e, "errno", None) == errno.EADDRINUSE:
-            url = f"http://127.0.0.1:{port}/"
-            print(f"Belegsuche läuft vermutlich schon: {url} – sonst anderen Port mit --port wählen")
-            if open_browser:
-                webbrowser.open(url)
+            print(f"Port {port} ist belegt. Eine laufende Suche im vorhandenen Fenster nutzen "
+                  "oder einen anderen Port mit --port wählen.")
         else:
             print(f"Port {port} lässt sich nicht öffnen: {getattr(e, 'strerror', None) or e} "
                   f"– anderen Port mit --port wählen")
         return 1
-    port = httpd.server_address[1]          # bei --port 0 vergibt das System den Port
-    httpd.RequestHandlerClass = make_handler(Searcher(db_path), port)
-    url = f"http://127.0.0.1:{port}/"
-    print(f"Belegsuche läuft: {url}  (beenden mit Ctrl+C)")
-    if open_browser:
-        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+    browser_timer = None
     try:
+        port = httpd.server_address[1]          # bei --port 0 vergibt das System den Port
+        httpd.RequestHandlerClass = make_handler(Searcher(db_path), port)
+        url = f"http://127.0.0.1:{port}/"
+        print(f"Belegsuche läuft: {url}  (beenden mit Ctrl+C)")
+        if open_browser:
+            browser_timer = threading.Timer(0.5, lambda: webbrowser.open(url))
+            browser_timer.daemon = True
+            browser_timer.start()
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        if browser_timer is not None:
+            browser_timer.cancel()
         httpd.server_close()
     return 0

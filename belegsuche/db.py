@@ -14,7 +14,7 @@ from pathlib import Path
 SCHEMA_VERSION = 1
 # Format der Suchtexte (Zusatz-Tokens, Dokument-Index). Ändert es sich, wird der Suchindex aus den
 # gespeicherten Seitentexten neu aufgebaut – ohne neue Texterkennung.
-INDEX_FORMAT = "8"
+INDEX_FORMAT = "9"           # Hausnummern auch nach einem Komma an die Straße binden
 FILE_TOKEN = "0f"            # + files.id, steht in der path-Spalte jeder Seite
 # Dateien, die Suche und Oberfläche anzeigen und öffnen: fertig eingelesen – oder seitdem geändert und noch
 # nicht neu eingelesen (bis dahin gilt der bisherige Text; er wird erst beim Neu-Einlesen ersetzt)
@@ -81,6 +81,35 @@ def default_db_path() -> Path:
     return Path.home() / "Library" / "Application Support" / "Belegsuche" / "index.db"
 
 
+class IncompatibleIndexError(sqlite3.DatabaseError):
+    """Fremde oder von dieser Programmversion nicht lesbare Datenbank; niemals automatisch ändern."""
+
+
+def _check_compatible(con: sqlite3.Connection, *, allow_empty: bool) -> None:
+    objects = con.execute("SELECT name, type FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'").fetchall()
+    tables = {r[0] for r in objects if r[1] == "table"}
+    if not objects and allow_empty:
+        # acquire_lock legt eine leere Datei an; eine neue SQLite-Datenbank hat noch keine Tabellen.
+        return
+    if not {"meta", "roots", "files", "pages", "fts", "vocab"}.issubset(tables):
+        raise IncompatibleIndexError("Diese Datenbank ist kein unterstützter Belegsuche-Index.")
+    try:
+        schema = get_meta(con, "schema")
+        fmt = get_meta(con, "index_format")
+    except sqlite3.DatabaseError as e:
+        raise IncompatibleIndexError("Diese Datenbank ist kein unterstützter Belegsuche-Index.") from e
+    if schema is not None and schema != str(SCHEMA_VERSION):
+        raise IncompatibleIndexError(f"Datenbankschema {schema!r} wird nicht unterstützt "
+                                     f"(diese Version: {SCHEMA_VERSION}).")
+    if fmt is not None:
+        if not isinstance(fmt, str) or not fmt.isascii() or not fmt.isdecimal():
+            raise IncompatibleIndexError(f"Indexformat {fmt!r} wird nicht unterstützt.")
+        version = fmt.lstrip("0") or "0"
+        if (len(version), version) > (len(INDEX_FORMAT), INDEX_FORMAT):
+            raise IncompatibleIndexError(f"Dieser Index ist neuer (Format {fmt}) als diese Belegsuche "
+                                         f"(Format {INDEX_FORMAT}). Bitte die Belegsuche aktualisieren.")
+
+
 def connect(path: Path, readonly: bool = False) -> sqlite3.Connection:
     if readonly:
         # als URI maskiert: "#", "?", "%" oder Leerzeichen im Pfad dürfen die Nur-Lese-Option nicht abschneiden
@@ -89,22 +118,33 @@ def connect(path: Path, readonly: bool = False) -> sqlite3.Connection:
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
         con = sqlite3.connect(path, timeout=30)
-        con.execute("PRAGMA journal_mode=WAL")
-        con.executescript(SCHEMA)
-        con.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema', ?)", (str(SCHEMA_VERSION),))
-        con.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('generation', '0')")
-        con.commit()
     con.row_factory = sqlite3.Row
-    con.execute("PRAGMA foreign_keys=ON")
-    con.execute("PRAGMA synchronous=NORMAL")
-    if not readonly and get_meta(con, "index_format") != INDEX_FORMAT:
-        if con.execute("SELECT 1 FROM pages LIMIT 1").fetchone():
-            print("Suchindex wird auf das neue Format umgestellt (einmalig, ohne neue Texterkennung) …",
-                  file=sys.stderr)
-            rebuild_search_index(con)
-        set_meta(con, "index_format", INDEX_FORMAT)
-        con.commit()
-    return con
+    try:
+        _check_compatible(con, allow_empty=not readonly)
+        if not readonly:
+            con.execute("PRAGMA journal_mode=WAL")
+            con.executescript(SCHEMA)
+            con.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema', ?)", (str(SCHEMA_VERSION),))
+            con.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('generation', '0')")
+            con.commit()
+        con.execute("PRAGMA foreign_keys=ON")
+        con.execute("PRAGMA synchronous=NORMAL")
+        if not readonly and get_meta(con, "index_format") != INDEX_FORMAT:
+            # Ein zweiter Start kann dasselbe alte Format gesehen haben. Nach dem Warten
+            # auf den Schreibzugriff erneut prüfen, bevor wir den gesamten Index aufbauen.
+            con.execute("BEGIN IMMEDIATE")
+            _check_compatible(con, allow_empty=False)
+            if get_meta(con, "index_format") != INDEX_FORMAT:
+                set_meta(con, "index_format", INDEX_FORMAT)
+                if con.execute("SELECT 1 FROM pages LIMIT 1").fetchone():
+                    print("Suchindex wird auf das neue Format umgestellt (einmalig, ohne neue Texterkennung) …",
+                          file=sys.stderr)
+                    rebuild_search_index(con)
+            con.commit()
+        return con
+    except BaseException:
+        con.close()
+        raise
 
 
 def delete_search_rows(con: sqlite3.Connection, file_id: int) -> None:
@@ -129,7 +169,7 @@ def index_file_text(con: sqlite3.Connection, file_id: int, relpath: str) -> None
 def rebuild_search_index(con: sqlite3.Connection) -> None:
     con.execute("DELETE FROM fts")
     con.execute("DELETE FROM fts_doc")
-    for f in con.execute("SELECT id, relpath FROM files WHERE status = 'done'").fetchall():
+    for f in con.execute(f"SELECT id, relpath FROM files WHERE status IN {SEARCHABLE_SQL}").fetchall():
         index_file_text(con, f["id"], f["relpath"])
     bump_generation(con)
     con.commit()
