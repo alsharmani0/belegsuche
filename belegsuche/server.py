@@ -18,13 +18,16 @@ from . import db as dbm
 from .search import Searcher
 
 UI_FILE = Path(__file__).with_name("ui.html")
+UI_ASSETS = {"/assets/glasarchiv.webp": ("glasarchiv.webp", "image/webp"),
+             "/assets/marke.svg": ("marke.svg", "image/svg+xml"),
+             "/favicon.ico": ("marke.svg", "image/svg+xml")}
 MAX_ID = 2**63 - 1                     # größter Wert, den SQLite als INTEGER speichert
 MAX_BODY = 10_000
 # Anfragen fremder Webseiten abweisen: der eigene Browser-Tab schickt same-origin,
 # Adresszeile/Lesezeichen/webbrowser.open schicken none, ältere Browser gar nichts.
 ALLOWED_FETCH_SITES = (None, "same-origin", "none")
 CSP_DEFAULT = "frame-ancestors 'none'"
-CSP_UI = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; "
+CSP_UI = ("default-src 'none'; img-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; "
           "base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 # Pfad darf nirgends (macOS: auch nicht in übergeordneten Ordnern) ein Symlink sein; O_NOFOLLOW_ANY
 # und O_NOFOLLOW zusammen ergeben EINVAL. O_NONBLOCK, damit eine untergeschobene Named Pipe das
@@ -148,6 +151,15 @@ def make_handler(searcher: Searcher, port: int):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif url.path in UI_ASSETS:
+                name, content_type = UI_ASSETS[url.path]
+                body = UI_FILE.with_name(name).read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(body)
             elif url.path == "/api/search":

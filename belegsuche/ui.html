@@ -3,80 +3,250 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>Belegsuche</title>
+<link rel="icon" href="/assets/marke.svg" type="image/svg+xml">
 <style>
   :root {
-    --bg: #f6f6f3; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e4e3de;
-    --accent: #1f5fbf; --accent-text: #ffffff; --mark: #ffe38a; --warn-bg: #fff4d6; --warn: #7a5a00;
-    --chip: #eef1f6; --radius: 10px;
+    color-scheme: light dark;
+    --paper:#eef2fa; --ink:#19182a; --sub:#47485f; --muted:#57596f; --rule:rgba(79,80,121,.17);
+    --veil:rgba(253,253,255,.78); --nav:rgba(249,250,255,.54); --edge:rgba(255,255,255,.95);
+    --well:rgba(255,255,255,.57); --control:rgba(248,249,255,.88); --control-edge:rgba(97,100,143,.25);
+    --accent:#6747bc; --mark:#e7d9fb; --mark-ink:#4c2683; --focus:#7452ca;
+    --cta-hi:#393356; --cta-lo:#252036; --success:#23734e; --pulse:#369f69;
+    --warn:#694a17; --warn-bg:#fff5df; --error:#a12838;
+    --blue-glow:rgba(164,199,253,.63); --iris-glow:rgba(187,165,244,.55); --apricot:rgba(255,201,190,.59);
+    --shadow:0 13px 38px -25px rgba(35,37,81,.32); --inner:inset 0 1px 0 var(--edge);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",sans-serif;
+    background:var(--paper); color:var(--ink);
   }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --bg: #171716; --panel: #22221f; --text: #ecebe6; --muted: #a09f98; --line: #34332f;
-      --accent: #6aa0ff; --accent-text: #0b1730; --mark: #6b5510; --warn-bg: #3a2f10; --warn: #f3d27a; --chip: #2c2f36;
+  @media(prefers-color-scheme:dark) {
+    :root {
+      --paper:#101321; --ink:#f0effb; --sub:#c3c3da; --muted:#afb0c7; --rule:rgba(182,185,225,.18);
+      --veil:rgba(24,27,44,.92); --nav:rgba(20,23,39,.76); --edge:rgba(236,231,255,.21);
+      --well:rgba(30,32,52,.78); --control:rgba(41,43,64,.93); --control-edge:rgba(190,191,225,.27);
+      --accent:#c2a6ff; --mark:#4d385e; --mark-ink:#f5e6ff; --focus:#c8abff;
+      --cta-hi:#6c5c98; --cta-lo:#50436f; --success:#a6e5c1; --pulse:#74c697;
+      --warn:#ffe3a8; --warn-bg:#342b22; --error:#ffa2ae;
+      --blue-glow:rgba(48,82,137,.59); --iris-glow:rgba(93,66,134,.59); --apricot:rgba(130,77,87,.43);
+      --shadow:0 15px 50px -24px rgba(2,3,12,.85);
     }
   }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text);
-         font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
-  main { max-width: 900px; margin: 0 auto; padding: 28px 16px 60px; }
-  h1 { font-size: 20px; margin: 0 0 14px; font-weight: 650; letter-spacing: -0.01em; }
-  form { display: flex; gap: 8px; }
-  input[type=search] { flex: 1; font-size: 18px; padding: 12px 14px; border-radius: var(--radius);
-    border: 1px solid var(--line); background: var(--panel); color: var(--text); outline: none; }
-  input[type=search]:focus { border-color: var(--accent); }
-  button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--text);
-    border-radius: 8px; padding: 6px 11px; cursor: pointer; }
-  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
-  button:disabled { opacity: .45; cursor: default; }
-  .meta { color: var(--muted); font-size: 13px; margin: 10px 2px 16px; min-height: 18px; }
-  .banner { background: var(--warn-bg); color: var(--warn); padding: 10px 12px; border-radius: var(--radius);
-    margin: 12px 0 0; font-size: 14px; }
-  .hit { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
-    padding: 14px 16px; margin-bottom: 10px; }
-  .top { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-  .name { font-weight: 620; font-size: 16px; word-break: break-all; }
-  .chip { font-size: 12px; background: var(--chip); border-radius: 999px; padding: 1px 8px; color: var(--muted); }
-  .path { color: var(--muted); font-size: 13px; margin-top: 2px; word-break: break-all; }
-  .snip { margin: 8px 0 10px; }
-  mark { background: var(--mark); color: inherit; border-radius: 3px; padding: 0 1px; }
-  .actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
-  .actions a { font-size: 14px; color: var(--accent); margin-left: 4px; }
-  .miss { font-size: 12px; color: var(--muted); margin-left: auto; }
-  .dups { font-size: 12px; color: var(--muted); margin-top: 6px; word-break: break-all; }
-  .err { color: #c0392b; font-size: 13px; }
-  .empty { color: var(--muted); padding: 30px 4px; }
+  *,*::before,*::after { box-sizing:border-box }
+  body { margin:0; min-height:100vh; font-size:15px; line-height:1.5; -webkit-font-smoothing:antialiased }
+  body::before { content:""; position:fixed; z-index:-1; inset:0; pointer-events:none;
+    background:radial-gradient(ellipse at 100% 3%,var(--apricot) 0,transparent 31%),
+      radial-gradient(ellipse at 77% 23%,var(--iris-glow) 0,transparent 44%),
+      radial-gradient(ellipse at 45% -16%,var(--blue-glow) 0,transparent 53%),
+      radial-gradient(ellipse at -8% 90%,var(--blue-glow) -24%,transparent 46%),var(--paper) }
+  [hidden] { display:none!important }
+  .wrap { width:min(87%,1240px); margin-inline:auto }
+  .topbar { background:var(--nav); border-bottom:1px solid var(--rule); box-shadow:var(--inner); backdrop-filter:blur(18px); -webkit-backdrop-filter:blur(18px) }
+  .nav { min-height:62px; display:flex; align-items:center; justify-content:space-between; gap:16px }
+  .brand { display:inline-flex; align-items:center; gap:11px; font-size:21px; font-weight:700; letter-spacing:-.045em }
+  .brand img { width:35px; height:35px }
+  .local,.connection { display:inline-flex; align-items:center; gap:8px; color:var(--sub); font-size:13px }
+  .dot { width:8px; height:8px; flex:none; border-radius:50%; background:var(--pulse); box-shadow:0 0 0 3px color-mix(in srgb,var(--pulse) 10%,transparent) }
+  main { padding-bottom:60px }
+  .masthead { display:grid; grid-template-columns:minmax(0,1.55fr) minmax(0,1fr); min-height:clamp(218px,19.7vw,282px); align-items:center }
+  .intro { z-index:1; padding:26px 0 24px clamp(0px,1.4vw,20px) }
+  h1,h2,h3,p { margin:0 }
+  h1 { font-size:clamp(53px,6.45vw,94px); line-height:1.02; letter-spacing:-.052em; font-weight:710 }
+  .period { color:var(--accent) }
+  .intro p { margin-top:16px; color:var(--sub); font-size:clamp(16px,1.65vw,24px); line-height:1.42; letter-spacing:-.025em }
+  .sculpture { position:relative; display:flex; align-items:center; justify-content:center; min-width:0; height:clamp(212px,19.4vw,276px); isolation:isolate; pointer-events:none }
+  .sculpture::after { content:""; position:absolute; z-index:-1; bottom:11%; width:49%; height:9%; border-radius:50%; background:rgba(94,68,172,.23); filter:blur(14px) }
+  .sculpture img { display:block; width:92%; height:89%; object-fit:contain; transform:rotate(5deg); filter:drop-shadow(0 5px 8px rgba(87,70,145,.09)) }
+  .sprite { position:absolute; width:0; height:0; overflow:hidden; pointer-events:none }
+  .icon { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:1.65; stroke-linecap:round; stroke-linejoin:round; flex:none }
+  .search-well { isolation:isolate; position:relative; display:flex; align-items:center; gap:14px; min-height:76px;
+    padding:9px 10px 9px 25px; border-radius:25px; border:1px solid var(--edge); background:var(--well);
+    box-shadow:inset 0 0 0 1px rgba(255,255,255,.20),inset 0 -4px 12px rgba(132,126,189,.09),0 0 0 1px var(--control-edge),0 12px 34px -17px rgba(68,59,125,.42);
+    backdrop-filter:blur(24px) saturate(1.3); -webkit-backdrop-filter:blur(24px) saturate(1.3) }
+  .search-well::before { content:""; position:absolute; z-index:-1; inset:5px; border:1px solid var(--edge); border-radius:20px; pointer-events:none; opacity:.66 }
+  .search-well:focus-within { outline:2px solid var(--focus); outline-color:color-mix(in srgb,var(--focus) 62%,transparent); outline-offset:2px }
+  .search-well > .icon { width:25px; height:25px; color:var(--muted) }
+  input[type=search] { min-width:0; flex:1; padding:9px 0; border:0; outline:0; background:transparent; color:var(--ink); font:inherit; font-size:clamp(17px,1.65vw,23px); letter-spacing:-.025em; text-overflow:ellipsis }
+  input::placeholder { color:var(--muted); opacity:1 }
+  kbd { font-family:inherit; font-size:13px; font-weight:550; line-height:1; color:var(--muted); white-space:nowrap;
+    padding:6px 8px; background:var(--control); border:1px solid var(--control-edge); border-radius:7px; box-shadow:var(--inner) }
+  button,a { -webkit-tap-highlight-color:transparent }
+  button { appearance:none; font:inherit; color:inherit; cursor:pointer }
+  button:focus-visible,a:focus-visible { outline:3px solid var(--focus); outline-offset:3px }
+  .submit { border:1px solid rgba(32,24,62,.55); background:linear-gradient(155deg,var(--cta-hi),var(--cta-lo)); color:#fff;
+    border-radius:17px; min-height:54px; padding:0 23px; display:inline-flex; align-items:center; gap:13px; justify-content:center;
+    font-size:17px; font-weight:590; box-shadow:inset 0 1px 0 rgba(255,255,255,.21),0 3px 8px rgba(36,32,59,.14) }
+  .submit .icon { width:20px; height:20px }
+  .submit:hover { filter:brightness(1.12) }
+  .submit:active,.action:active,.example:active { transform:translateY(1px) }
+  .examples { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:16px 0 0; padding-inline:4px; color:var(--muted); font-size:13px }
+  .examples > span { margin-right:3px }
+  .example,.action { border:1px solid var(--control-edge); background:var(--control); box-shadow:var(--inner); border-radius:9px }
+  .example { padding:4px 10px; font-size:13px; color:var(--sub) }
+  .example:hover,.action:hover:not(:disabled) { border-color:var(--focus); color:var(--accent) }
+  .panel { margin-top:27px; border:1px solid var(--edge); border-radius:20px; background:var(--veil); box-shadow:var(--inner),var(--shadow); overflow:hidden }
+  .panel-head { padding:16px 22px; display:flex; align-items:baseline; flex-wrap:wrap; justify-content:space-between; gap:4px 16px; border-bottom:1px solid var(--rule) }
+  h2 { font-size:clamp(19px,1.8vw,25px); line-height:1.3; letter-spacing:-.048em; font-weight:680 }
+  .meta { color:var(--muted); font-size:13px; overflow-wrap:anywhere; font-variant-numeric:tabular-nums }
+  .archive-row,.hit { display:grid; grid-template-columns:64px minmax(0,1fr) auto; align-items:center; gap:20px;
+    margin-inline:22px; padding:19px 0; border-bottom:1px solid var(--rule) }
+  .archive-row:last-child,.hit:last-child { border-bottom:0 }
+  .archive-row { min-height:88px; grid-template-columns:46px minmax(0,1fr) auto }
+  .folder-tile { display:grid; place-items:center; width:44px; height:44px; color:var(--accent); border:1px solid var(--control-edge); border-radius:13px; background:var(--control) }
+  .folder-tile .icon { width:23px; height:23px }
+  .archive-name,.name { font-size:clamp(16px,1.4vw,20px); font-weight:660; letter-spacing:-.025em; line-height:1.28; overflow-wrap:anywhere }
+  .archive-path,.path,.dups,.miss { color:var(--muted); font-size:13px; line-height:1.45; overflow-wrap:anywhere }
+  .archive-path { margin-top:2px }
+  .connection { color:var(--success); font-size:12px; white-space:nowrap }
+  .connection.off { color:var(--warn) }
+  .off .dot { background:#bf8a46 }
+  .doc-tile { min-height:55px; border-right:1px solid var(--rule); display:grid; place-items:center; padding-right:15px }
+  .sheet { position:relative; display:block; width:38px; height:49px; filter:drop-shadow(0 3px 4px rgba(76,68,110,.13)) }
+  .sheet svg { width:100%; height:100%; stroke:#a1abc4; stroke-width:1.2; stroke-linejoin:round; fill:#f9faff }
+  .sheet .fold { fill:#e3e8f5 }
+  .sheet b { position:absolute; left:4px; right:5px; bottom:6px; font:720 10px/1.5 -apple-system,BlinkMacSystemFont,sans-serif; text-align:center; color:#9a3739; background:#ffe8e6; border-radius:3px }
+  .sheet.image b { color:#2a5593; background:#e4edff }
+  .top,.flags { display:flex; gap:6px; flex-wrap:wrap; align-items:center }
+  .top { gap:5px 10px }
+  .chip { font-size:11px; line-height:1.45; padding:1px 6px; color:var(--sub); border:1px solid var(--rule); border-radius:5px; white-space:nowrap }
+  .path { display:flex; align-items:flex-start; gap:6px; margin-top:4px }
+  .path .icon { width:14px; height:14px; margin-top:2px }
+  .snip { margin-top:6px; color:var(--sub); line-height:1.5; font-size:14px; overflow-wrap:anywhere }
+  mark { background:var(--mark); color:var(--mark-ink); padding:1px 2px; border-radius:3px; font-weight:600; box-decoration-break:clone; -webkit-box-decoration-break:clone }
+  .miss,.dups { margin-top:6px; font-size:12px }
+  .actions { display:flex; justify-content:flex-end; align-items:center; gap:6px; flex-wrap:wrap; max-width:255px }
+  .action { min-height:34px; padding:5px 10px; display:inline-flex; gap:6px; align-items:center; justify-content:center; font-size:13px; font-weight:530; white-space:nowrap }
+  .action .icon { width:15px; height:15px }
+  .action:disabled { opacity:.5; cursor:not-allowed }
+  .page-link { display:inline-flex; align-items:center; gap:5px; flex-basis:100%; justify-content:flex-end; font-size:12px; color:var(--accent); text-underline-offset:3px }
+  .err { flex-basis:100%; text-align:right; color:var(--error); font-size:12px }
+  .banner { background:var(--warn-bg); color:var(--warn); border:1px solid var(--rule); border-radius:12px; padding:10px 15px; margin-top:15px; font-size:13px; overflow-wrap:anywhere }
+  .empty { padding:22px; color:var(--sub); font-size:14px }
+  @media(max-width:900px) {
+    .wrap { width:calc(100% - 64px) }
+    .hit { grid-template-columns:54px minmax(0,1fr); column-gap:15px; row-gap:10px }
+    .actions { grid-column:2; max-width:none; justify-content:flex-start }
+    .page-link { flex-basis:auto; margin-left:4px }
+    .err { text-align:left }
+  }
+  @media(max-width:600px) {
+    .wrap { width:calc(100% - 32px) }
+    .nav { min-height:53px }
+    .brand { font-size:18px; gap:7px }
+    .brand img { width:29px; height:29px }
+    .local { font-size:11px; gap:6px }
+    .dot { width:6px; height:6px }
+    .masthead { min-height:190px; grid-template-columns:minmax(0,1fr) 32% }
+    .intro { padding:24px 0 }
+    h1 { font-size:clamp(39px,8.8vw,51px); letter-spacing:-.065em }
+    .intro p { font-size:14px; margin-top:11px; max-width:28ch }
+    .sculpture { width:110%; height:145px; justify-self:end }
+    .sculpture img { width:100%; height:100% }
+    .search-well { padding:6px 6px 6px 12px; min-height:56px; gap:8px; border-radius:18px }
+    .search-well::before { inset:3px; border-radius:15px }
+    .search-well > .icon { width:19px; height:19px }
+    input[type=search] { font-size:16px; padding-block:5px }
+    kbd { display:none }
+    .submit { min-height:42px; border-radius:12px; padding:0 11px; font-size:14px; gap:5px }
+    .submit .icon { width:15px; height:15px }
+    .panel { margin-top:20px; border-radius:16px }
+    .panel-head { padding:13px 15px }
+    .examples { gap:6px; margin-top:11px }
+    .examples > span { flex-basis:100% }
+    .example { padding:5px 8px; min-height:32px }
+    .hit,.archive-row { margin-inline:14px; padding:15px 0; column-gap:12px }
+    .hit { grid-template-columns:35px minmax(0,1fr); align-items:start }
+    .doc-tile { min-height:0; padding:0; border:0 }
+    .sheet { width:31px; height:41px }
+    .sheet b { font-size:8px; bottom:5px }
+    .archive-row { grid-template-columns:32px minmax(0,1fr); row-gap:5px }
+    .folder-tile { width:32px; height:34px; border-radius:9px }
+    .folder-tile .icon { width:18px; height:18px }
+    .connection { grid-column:2 }
+    .snip { font-size:13px }
+    .action { min-height:42px }
+    .page-link { justify-content:flex-start; margin:0; min-height:28px }
+  }
+  @media(prefers-reduced-transparency:reduce) {
+    .topbar,.search-well,.panel { background:var(--paper); backdrop-filter:none; -webkit-backdrop-filter:none }
+  }
+  @media(forced-colors:active) {
+    .topbar,.search-well,.panel,.action,.submit,.folder-tile { border:1px solid CanvasText }
+    .sculpture { visibility:hidden }
+  }
 </style>
 </head>
 <body>
-<main>
-  <h1>Belegsuche</h1>
-  <form id="f" autocomplete="off">
-    <input id="q" type="search" placeholder="Firma, Rechnungsnummer, Betrag oder Beschreibung …" autofocus>
-    <button class="primary" type="submit">Suchen</button>
+<svg class="sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="7.2"/><path d="m16 16 5 5"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h15m-6-6 6 6-6 6"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M2.8 7V5.8c0-1.1.8-1.8 1.9-1.8h5l2.4 2.6h7.1c1.2 0 2 .9 2 2v9.7c0 1-.8 1.8-1.9 1.8H4.7c-1.1 0-1.9-.8-1.9-1.8V7Z"/><path d="M3.4 8h17"/></symbol>
+  <symbol id="i-open" viewBox="0 0 24 24"><path d="M13 4h7v7m0-7-10 10"/><path d="M10 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5"/></symbol>
+</defs></svg>
+<header class="topbar"><div class="nav wrap">
+  <div class="brand"><img src="/assets/marke.svg" alt="" width="35" height="35">Belegsuche</div>
+  <span class="local"><span class="dot" aria-hidden="true"></span>Lokal auf diesem Mac</span>
+</div></header>
+<main class="wrap">
+  <section class="masthead" aria-labelledby="headline">
+    <div class="intro"><h1 id="headline">Belege finden<span class="period">.</span></h1>
+      <p>Durchsuche deine Rechnungen, Dokumente und Scans.</p></div>
+    <div class="sculpture" aria-hidden="true"><img src="/assets/glasarchiv.webp" alt="" width="360" height="280"></div>
+  </section>
+  <form class="search-well" id="f" role="search" autocomplete="off">
+    <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
+    <input id="q" type="search" aria-label="Suchbegriffe" aria-keyshortcuts="Meta+K Control+K" maxlength="300" placeholder="Firma, Betrag, Stichwort …" autofocus>
+    <kbd aria-hidden="true">⌘ K</kbd>
+    <button class="submit" type="submit">Suchen <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></button>
   </form>
+  <div class="examples" id="examples" aria-label="Beispielsuchen">
+    <span>Zum Beispiel</span>
+    <button class="example" type="button">Heizungswartung</button>
+    <button class="example" type="button">1.234,56 €</button>
+    <button class="example" type="button">RE-2021/00487</button>
+  </div>
   <div id="banner"></div>
-  <div class="meta" id="meta"></div>
-  <div id="results"></div>
+  <section class="panel" aria-labelledby="section-title">
+    <div class="panel-head"><h2 id="section-title">Dein Archiv</h2>
+      <div class="meta" id="meta" role="status" aria-live="polite"></div></div>
+    <div id="archive"></div>
+    <div id="results"></div>
+  </section>
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
 let timer = null, seq = 0;
+const OFFLINE = 'läuft „belegsuche start“ noch?';
 
 function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-
-async function status() {
-  try {
-    const s = await (await fetch('/api/status')).json();
-    const off = s.roots.filter(r => !r.online);
-    $('banner').innerHTML = off.length
-      ? `<div class="banner">Nicht verbunden: ${off.map(r => esc(r.path)).join(', ')}. Suchen geht, Öffnen erst nach dem Anschließen.</div>`
-      : '';
-    if (!$('q').value) $('meta').textContent = `${s.files.toLocaleString('de-DE')} Dokumente durchsuchbar`;
-  } catch (e) {}
+function icon(name) { return `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`; }
+function rootName(path) { return String(path).split('/').filter(Boolean).pop() || '/'; }
+function showArchive(on) {
+  $('section-title').textContent = on ? 'Dein Archiv' : 'Suchergebnisse';
+  $('archive').hidden = !on;
+  $('examples').hidden = !on;
 }
 
-const OFFLINE = 'läuft „belegsuche start“ noch?';
+async function status() {
+  const my = seq;
+  try {
+    const resp = await fetch('/api/status');
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const s = await resp.json();
+    const off = s.roots.filter(r => !r.online);
+    $('banner').innerHTML = off.length
+      ? `<div class="banner">Nicht verbunden: ${off.map(r => esc(r.path)).join(', ')}. Suchen geht, Öffnen erst nach dem Anschließen.</div>` : '';
+    if (my !== seq || $('q').value.trim()) return;
+    $('meta').textContent = `${s.files.toLocaleString('de-DE')} ${s.files === 1 ? 'Dokument' : 'Dokumente'} durchsuchbar`;
+    $('archive').innerHTML = s.roots.length ? s.roots.map(r => `
+      <div class="archive-row"><span class="folder-tile">${icon('folder')}</span>
+        <div><h3 class="archive-name">${esc(rootName(r.path))}</h3><p class="archive-path">${esc(r.path)}</p></div>
+        <span class="connection ${r.online ? '' : 'off'}"><span class="dot" aria-hidden="true"></span>${r.online ? 'Verbunden' : 'Offline'}</span>
+      </div>`).join('') : '<div class="empty">Noch kein Belegordner eingelesen. Wähle über „Ordner einlesen“ einen Ordner aus.</div>';
+  } catch (e) {
+    if (my === seq && !$('q').value.trim()) { $('archive').innerHTML = ''; $('meta').textContent = `Status nicht erreichbar – ${OFFLINE}`; }
+  }
+}
 
 async function openFile(id, reveal, btn) {
   let msg = '';
@@ -85,25 +255,46 @@ async function openFile(id, reveal, btn) {
                                         body: JSON.stringify({id, reveal})});
     const j = await r.json().catch(() => ({}));
     if (!r.ok || j.error) msg = j.error || `Öffnen fehlgeschlagen (Fehler ${r.status})`;
-  } catch (e) {
-    msg = `Öffnen fehlgeschlagen – ${OFFLINE}`;
-  }
+  } catch (e) { msg = `Öffnen fehlgeschlagen – ${OFFLINE}`; }
   const span = btn.parentElement.querySelector('.err') || Object.assign(document.createElement('span'), {className: 'err'});
   span.textContent = msg;
   if (msg) btn.parentElement.appendChild(span);
 }
 
+function hitRow(h) {
+  const kind = h.pdf ? 'PDF' : String(h.filename).split('.').pop().slice(0, 4).toUpperCase();
+  const flags = [h.pages > 1 && `Seite ${h.page} von ${h.pages}`, h.ocr && 'Scan',
+                 h.outdated && 'Wird neu eingelesen', h.duplicates.length && `${h.duplicates.length + 1}× vorhanden`].filter(Boolean);
+  const path = [rootName(h.root), ...String(h.folder).split('/').filter(Boolean)].join(' / ');
+  const disabled = h.available ? '' : 'disabled title="Datei nicht erreichbar"';
+  return `<article class="hit">
+    <div class="doc-tile" aria-hidden="true"><span class="sheet ${h.pdf ? '' : 'image'}">
+      <svg viewBox="0 0 40 52"><path d="M6 1.5h18l14 14v31.8a3.4 3.4 0 0 1-3.4 3.4H6a4 4 0 0 1-4-4V5.5a4 4 0 0 1 4-4Z"/><path class="fold" d="M24 1.5v10.2c0 2.3 1.5 3.8 3.8 3.8H38Z"/></svg><b>${esc(kind)}</b></span></div>
+    <div class="hit-body"><div class="top"><h3 class="name">${esc(h.filename)}</h3>
+      ${flags.length ? `<span class="flags">${flags.map(f => `<span class="chip">${esc(f)}</span>`).join('')}</span>` : ''}</div>
+      <div class="path" title="${esc(h.root)}/${esc(h.folder)}">${icon('folder')}<span>${esc(path)}</span></div>
+      <div class="snip">${h.snippet}</div>
+      ${h.missing.length ? `<div class="miss">Nicht enthalten: ${h.missing.map(esc).join(', ')}</div>` : ''}
+      ${h.duplicates.length ? `<div class="dups">Auch unter: ${h.duplicates.map(esc).join(' · ')}</div>` : ''}</div>
+    <div class="actions"><button class="action" type="button" ${disabled} onclick="openFile(${h.id}, false, this)">${icon('open')}Öffnen</button>
+      <button class="action" type="button" ${disabled} onclick="openFile(${h.id}, true, this)">${icon('folder')}Im Finder zeigen</button>
+      ${h.pdf && h.pages > 1 && h.available ? `<a class="page-link" href="/datei/${h.id}#page=${h.page}" target="_blank" rel="noopener">Seite ${h.page} im Browser</a>` : ''}</div>
+    </article>`;
+}
+
 async function search() {
   const q = $('q').value.trim();
   const my = ++seq;
-  if (!q) { $('results').innerHTML = ''; status(); return; }
+  showArchive(!q);
+  if (!q) { $('results').innerHTML = ''; $('meta').textContent = ''; await status(); return; }
+  $('meta').textContent = 'Suche …';
   let r;
   try {
     const resp = await fetch('/api/search?q=' + encodeURIComponent(q));
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     r = await resp.json();
   } catch (e) {
-    if (my !== seq) return;   // veraltete Anfrage – neuere Suche ist schon unterwegs
+    if (my !== seq) return;
     $('results').innerHTML = '';
     $('meta').textContent = `Suche fehlgeschlagen – ${OFFLINE}`;
     return;
@@ -111,30 +302,28 @@ async function search() {
   if (my !== seq) return;
   const unknown = r.unknown.length ? ` · kommt nirgends vor: ${r.unknown.map(esc).join(', ')}` : '';
   $('meta').innerHTML = `${r.hits.length} Treffer · ${r.ms} ms${unknown}`;
-  if (!r.hits.length) { $('results').innerHTML = '<div class="empty">Nichts gefunden. Weniger oder andere Wörter probieren.</div>'; return; }
-  $('results').innerHTML = r.hits.map(h => `
-    <div class="hit">
-      <div class="top">
-        <span class="name">${esc(h.filename)}</span>
-        ${h.pages > 1 ? `<span class="chip">Seite ${h.page} von ${h.pages}</span>` : ''}
-        ${h.ocr ? '<span class="chip">Scan</span>' : ''}
-        ${h.outdated ? '<span class="chip" title="Datei wurde geändert – Suchtext vom letzten Einlesen, bis belegsuche index sie neu einliest">geändert – wird neu eingelesen</span>' : ''}
-        ${h.duplicates.length ? `<span class="chip">${h.duplicates.length + 1}× vorhanden</span>` : ''}
-      </div>
-      <div class="path">${esc(h.root)}/${esc(h.folder)}</div>
-      <div class="snip">${h.snippet}</div>
-      <div class="actions">
-        <button class="primary" ${h.available ? '' : 'disabled title="Laufwerk nicht verbunden"'} onclick="openFile(${h.id}, false, this)">Öffnen</button>
-        <button ${h.available ? '' : 'disabled'} onclick="openFile(${h.id}, true, this)">Im Finder zeigen</button>
-        ${h.pdf && h.pages > 1 && h.available ? `<a href="/datei/${h.id}#page=${h.page}" target="_blank" rel="noopener">Seite ${h.page} im Browser</a>` : ''}
-        ${h.missing.length ? `<span class="miss">nicht enthalten: ${h.missing.map(esc).join(', ')}</span>` : ''}
-      </div>
-      ${h.duplicates.length ? `<div class="dups">Auch unter: ${h.duplicates.map(esc).join(' · ')}</div>` : ''}
-    </div>`).join('');
+  $('results').innerHTML = r.hits.length ? r.hits.map(hitRow).join('')
+    : '<div class="empty"><strong>Nichts gefunden.</strong> Probiere weniger Wörter, eine Rechnungsnummer oder einen Betrag.</div>';
 }
 
-$('f').addEventListener('submit', (e) => { e.preventDefault(); clearTimeout(timer); search(); });
-$('q').addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(search, 300); });
+$('f').addEventListener('submit', e => { e.preventDefault(); clearTimeout(timer); search(); });
+$('q').addEventListener('input', () => {
+  ++seq; clearTimeout(timer);
+  if (!$('q').value.trim()) { search(); return; }
+  showArchive(false); $('results').innerHTML = ''; $('meta').textContent = 'Suche …';
+  timer = setTimeout(search, 300);
+});
+$('examples').addEventListener('click', e => {
+  const example = e.target.closest('button');
+  if (example) { clearTimeout(timer); $('q').value = example.textContent; $('q').focus(); search(); }
+});
+document.addEventListener?.('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'k') {
+    e.preventDefault(); $('q').focus(); $('q').select();
+  } else if (e.key === 'Escape' && document.activeElement === $('q') && $('q').value) {
+    e.preventDefault(); clearTimeout(timer); $('q').value = ''; search();
+  }
+});
 status();
 </script>
 </body>

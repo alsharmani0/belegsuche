@@ -8,9 +8,13 @@ search index on your Mac without changing the original files. The search is tune
 Belege, Rechnungen und Dokumente auf dem Mac durchsuchen – auch eingescannte, auch wenn die Datei
 `Scan_00487.pdf` heißt und tief in einem Unterordner liegt.
 
-![Suchoberfläche im Browser: Die Suche „Wartung Heizung Musterstraße“ findet eine Rechnung, in der „Heizungswartung“ und „Musterstr.“ steht](docs/screenshot.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshot-dunkel.jpg">
+  <img src="docs/screenshot.png" alt="Belegsuche im Browser: Die Suche nach Heizungswartung zeigt PDF- und Bildtreffer mit Fundstelle, Ordner und Dateiaktionen.">
+</picture>
 
-*Beispiel mit dem erfundenen Testbestand aus `tools/make_testdata.py`.*
+*Beispiel mit fiktiven Belegen. Die Oberfläche folgt dem hellen oder dunklen Erscheinungsbild des Systems.
+Mit ⌘ K springt man ins Suchfeld, mit Esc zurück zur Ordnerübersicht.*
 
 - **Lokal**: keine Cloud, keine laufenden Kosten. Texterkennung (OCR) mit Apples eingebautem Vision-Framework.
 - **Originale bleiben unverändert**: Dateien werden nur gelesen. Der Suchindex liegt auf dem Mac

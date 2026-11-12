@@ -41,7 +41,7 @@ belegsuche = "belegsuche.cli:main"
 packages = ["belegsuche"]
 
 [tool.setuptools.package-data]
-belegsuche = ["ui.html"]
+belegsuche = ["ui.html", "glasarchiv.webp", "marke.svg"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
