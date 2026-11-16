@@ -3,6 +3,53 @@
 Bedienung und Messbefehle stehen in der [README](../README.md). Die früheren Messwerte sind unten
 getrennt aufgeführt: Die beiden alten Fragenlisten sind kein Blindtest für den aktuellen Code.
 
+## winmail.dat aus Outlook (TNEF) (16.11.2026)
+
+Eine Vermessung des echten Bestands (alle Mails nur gelesen) ergab: knapp 1 % der Mails tragen eine `winmail.dat`,
+in den jüngsten Vorgangsordnern ein Drittel; darin stecken vor allem PDFs, von denen es viele sonst nirgends gibt.
+
+- **Lesen:** eigenes Modul `belegsuche/tnef.py`, nur Standardbibliothek (MS-OXTNEF): Attribute mit Prüfsumme,
+  MAPI-Eigenschaften (benannte Eigenschaften, Mehrfachwerte, PT_OBJECT), Anhänge mit Daten, Name (lange Form vor
+  dem Titel, der Umlaute oft nur als „?“ hat), MIME-Tag, Content-ID, Kennzeichen, Methode; eingebettete
+  Nachrichten und OLE-Objekte. Mailtext aus PR_BODY, PR_HTML oder PR_RTF_COMPRESSED (LZFu mit CRC, MELA; aus HTML
+  oder Text gekapseltes RTF wird entkapselt, sonst schlichter RTF-zu-Text-Weg ohne Hilfsprogramm). Codepages,
+  die Python nicht als `cpNNNNN` kennt (28591, 28605, 20127), werden abgebildet.
+- **Teile:** Die `winmail.dat` bleibt ein Teil ohne Seiten (`kind 'tnef'`, Hinweis „ausgewertet: 3 Anhänge“ oder
+  der Grund). Jeder Anhang darin ist ein eigener Teil und läuft durch dieselbe Verarbeitung wie ein Mail-Anhang
+  (Art an den ersten Bytes, Logos und zu kleine Bilder übersprungen – Bild im Mailtext heißt hier: Content-ID,
+  Kennzeichen 4 oder versteckt –, Grenzen, gleicher Inhalt in derselben Mail nur einmal, Übernahme bekannter Seiten
+  über die sha256, Warten gleichzeitiger Mails auf denselben Inhalt). Eingebettete Outlook-Nachrichten sind wie
+  angehängte Mails ein Teil `mail` mit eigener Seite; eine `winmail.dat` in der `winmail.dat` wird mit geöffnet
+  (Tiefe 2).
+- **Adresse:** `mime_path` „2!3“ = Anhang 3 der `winmail.dat` in Teil 2 (Reihenfolge im Strom, übersprungene Logos
+  mitgezählt), auch verschachtelt („2!3!1“, „3/2!1“). `find_part` löst das auf; Öffnen und Ausliefern über den
+  Server sind unverändert (sha-Prüfung mit 409, Typ-Allowlist, Quarantäne, Namensbereinigung).
+- **Mailtext:** Hat die Mail keinen brauchbaren Text (weniger als drei Buchstaben oder Ziffern), gilt der Text der
+  `winmail.dat`; sonst wird nichts doppelt gespeichert. Im Bestand hat jede dieser Mails eigenen Text.
+- **Robustheit:** Der Leser wirft nie; Längen werden gegen den Rest geprüft, Attribute (100.000), Eigenschaften je
+  Liste (20.000), Anhänge (1.000) und entpacktes RTF (4 MB) sind begrenzt. Kaputte oder abgeschnittene Ströme
+  liefern das Lesbare, der Rest steht als Hinweis am Teil; eine falsche Prüfsumme ist nur ein Hinweis.
+- **Erkennung:** `sniff` prüft die TNEF-Kennung jetzt vor der Suche nach „%PDF-“ hinter einem Vorspann – eine
+  kleine `winmail.dat` mit einem PDF vorn galt sonst als PDF.
+- **Anzeige:** Suche, `belegsuche suche` und Oberfläche zeigen „Anhang 3 · Rechnung.pdf (aus winmail.dat)“; die
+  Logzeile zählt „2 Anhänge (1 aus winmail.dat)“; der Bericht zählt die `winmail.dat` getrennt (geöffnet, Anhänge
+  darin, nicht ausgewertet mit Grund).
+
+**Verifiziert:** 829 Tests grün, davon 64 neue in `tests/test_tnef.py` und `tests/test_winmail.py` (nur erfundene
+Daten: Bauhelfer für TNEF, LZFu und MELA in `tests/conftest.py`, Testvektoren aus MS-OXRTFCP, kaputte und
+abgeschnittene Ströme, riesige Längenfelder, Kompressionsbombe, Umstellung 10 → 11, Öffnen mit sha-Prüfung).
+Probelauf mit echten Daten (derselbe Nummernbereich wie bei der Nachbesserung: 2.540 Dateien, davon 1.366 Mails,
+eigener Index, `--parallel 3`, Domus nur gelesen): erst mit dem alten Stand als Format 10 eingelesen (4,9 min,
+171 Mails mit `winmail.dat`, alle „nicht ausgewertet“), dann mit dem neuen Stand umgestellt und eingelesen: genau
+diese 171 Mails neu gelesen (0,1 min), die Seiten aller übrigen Dateien unverändert, 0 Fehler. In den
+`winmail.dat` stecken 145 Anhänge (98 PDF, 46 Bilder, 1 Word) mit 306 Seiten; 49 enthalten nur Logos, 12 gar
+keine Anhänge. 218 Seiten mit Texterkennung wurden übernommen, 72 neu erkannt – keine davon mit schon bekanntem
+Inhalt; die Seitenbereiche sind lückenlos. Suche nach den zwei seltensten Wörtern jedes PDFs aus einer
+`winmail.dat`: 93 von 98 unter den ersten 10 Treffern (59 auf Platz 1, 41 davon unter einer gleichen
+eigenständigen Datei als „auch unter“), die übrigen auf Platz 11–12. Ein zweiter Lauf liest nichts mehr; die
+alte Version lehnt den umgestellten Index ab. Größe, Änderungszeit und sha256 aller 2.545 Dateien des Bereichs
+waren vorher und nachher gleich.
+
 ## Nachbesserung nach der Prüfung von E-Mail und Word (16.11.2026)
 
 Zwei Prüfungen (Code/Sicherheit und Probelauf mit echten Daten) haben Befunde geliefert; behoben sind:
@@ -44,8 +91,8 @@ verändert; 2.689 statt 2.791 Seiten per Texterkennung, kein Anhanginhalt mehr d
 Dateinamen eines Anhangs, der auch als Datei vorliegt: Datei auf Platz 1 in 28 von 34 Fällen (vorher 2 von 30),
 bei Platzhaltern in 54 von 60 (vorher 6 von 40); keine Word-Seite mehr mit Feldbefehlen.
 
-Offen (bewusst): Anhänge in `winmail.dat` (TNEF) bleiben nach der Vorgabe unausgewertet, obwohl dort oft PDFs
-stecken; ein eigener TNEF-Leser wäre der nächste Schritt. Lange URLs und wiederkehrende Signaturbilder bleiben im
+Offen (bewusst): Anhänge in `winmail.dat` (TNEF) blieben nach der Vorgabe unausgewertet (inzwischen umgesetzt,
+siehe oben). Lange URLs und wiederkehrende Signaturbilder bleiben im
 Index. Anhänge hinter einer falschen MIME-Grenze werden nicht gelesen (nur der Text bleibt, ohne base64).
 
 ## E-Mail und Word (16.11.2026)
@@ -133,18 +180,27 @@ Ein privater Suchindex wurde für diese Projektprüfung nicht geöffnet oder mig
 ## Indexformat
 
 Indexformat 10 ergänzt die Tabellen `parts` und `mails` und schreibt bei E-Mails Betreff, Absender, Empfänger,
-Datum und den Anhangnamen in die Pfadspalte des Suchindex. Ein Index im Format 9 wird ohne Neuaufbau umgestellt
-(nur das Format wird vermerkt; vorhandene Suchzeilen ändern sich nicht). Noch ältere Suchindizes werden aus ihren
-gespeicherten Seitentexten neu aufgebaut – auch bei bereits indizierten Dateien, die auf das erneute
-Einlesen warten. Bestehende OCR-Ergebnisse werden bei dieser Migration nicht ersetzt. Ältere Programmversionen
-lehnen einen Index im Format 10 ab.
+Datum und den Anhangnamen in die Pfadspalte des Suchindex. Indexformat 11 öffnet `winmail.dat` (Teil `tnef`,
+Anhänge darin mit `mime_path` „…!k“). Ein Index im Format 9 oder 10 wird ohne Neuaufbau umgestellt (nur das Format
+wird vermerkt; vorhandene Suchzeilen ändern sich nicht). Dabei – und vor jedem `belegsuche index`, damit auch Mails
+eines noch laufenden älteren Programms erfasst werden – werden genau die fertigen Mails zum Neueinlesen vorgemerkt,
+deren `winmail.dat` Format 10 nur vermerkt hat (`parts.note` „nicht ausgewertet (winmail.dat aus Outlook)“). Ihr
+alter Stand wird nicht übernommen, auch nicht von einer gleichen Mail an anderem Ort; die schon erkannten Seiten
+ihrer übrigen Anhänge übernimmt das Neulesen aus ihren eigenen Teilen, ohne neue Texterkennung. Bis dahin bleibt
+ihr bisheriger Text durchsuchbar. Noch ältere Suchindizes werden aus ihren gespeicherten Seitentexten neu aufgebaut
+– auch bei bereits indizierten Dateien, die auf das erneute Einlesen warten. Bestehende OCR-Ergebnisse werden bei
+diesen Umstellungen nicht ersetzt. Ältere Programmversionen lehnen einen Index im Format 11 ab.
 
 ## Bekannte Grenzen
 
 - Excel, ZIP und Outlook-`.msg` werden nicht gelesen; der Bericht zählt sie als „nicht unterstützt“. In Mails
-  bleiben `winmail.dat` (Outlook/TNEF – im Probelauf enthielten mehr als die Hälfte davon PDFs), Excel-, ZIP- und
-  Video-Anhänge, Anhänge über 50 MB und passwortgeschützte PDFs unausgewertet (Hinweis am Anhang). Verschlüsselte
-  Mails (S/MIME): nur der Kopf.
+  bleiben Excel-, ZIP- und Video-Anhänge, Anhänge über 50 MB und passwortgeschützte PDFs unausgewertet (Hinweis am
+  Anhang). Verschlüsselte Mails (S/MIME): nur der Kopf.
+- `winmail.dat`: über 100 MB nicht geöffnet; OLE-Objekte und Verweis-Anhänge darin werden nicht ausgewertet (nur
+  ein Hinweis), ebenso verschlüsselte Outlook-Nachrichten (S/MIME); bei Kalendereinladungen werden nur die Anhänge
+  gelesen, nicht die Termindaten. Eingebettete Nachrichten und `winmail.dat` in der `winmail.dat` bis Tiefe 2. Der
+  Text der `winmail.dat` zählt nur, wenn die Mail keinen eigenen hat. Die Nachrichtenattribute (Absender, Datum)
+  der `winmail.dat` werden nicht ausgewertet; Kopf und Datum kommen aus der Mail.
 - Bilder in Word-Dateien werden nicht per Texterkennung gelesen (eingescannte Belege in Word bleiben ohne Text,
   mit Hinweis). Seiten einer Word-Datei gibt es nur an harten Seitenumbrüchen; sonst ist sie eine Seite.
 - Zitierte Vorgänger-Mails bleiben im Mailtext und werden mit durchsucht.
