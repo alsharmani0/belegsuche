@@ -331,3 +331,204 @@ class BytesEngine:
     def recognize_bytes(self, data):
         self.calls += 1
         return self._result
+
+
+# --- winmail.dat (TNEF) bauen – nur erfundene Daten --------------------------------------------------------
+# Aufbau wie im Bestand vermessen (MS-OXTNEF): Signatur, Schlüssel, Attribute (Ebene, Kennung, Länge, Daten,
+# Prüfsumme); Anhänge in den drei vorkommenden Bauformen der Eigenschaften (A „Datei“, B „inline“, C „minimal“).
+
+TNEF_SIG = b"\x78\x9f\x3e\x22"
+PSETID_COMMON = bytes.fromhex("0820060000000000c000000000000046")
+PS_PUBLIC_STRINGS = bytes.fromhex("2903020000000000c000000000000046")
+IID_IMESSAGE = bytes.fromhex("0703020000000000c000000000000046")
+IID_ISTORAGE = bytes.fromhex("0b00000000000000c000000000000046")
+PT_SHORT, PT_LONG, PT_BOOLEAN, PT_SYSTIME, PT_CLSID = 0x0002, 0x0003, 0x000B, 0x0040, 0x0048
+PT_STRING8, PT_UNICODE, PT_BINARY, PT_OBJECT, MV = 0x001E, 0x001F, 0x0102, 0x000D, 0x1000
+
+
+def tnef_attr(level: int, att_id: int, data: bytes, checksum: int | None = None) -> bytes:
+    import struct
+    cks = sum(data) & 0xFFFF if checksum is None else checksum
+    return struct.pack("<BII", level, att_id, len(data)) + data + struct.pack("<H", cks)
+
+
+def _pad4(b: bytes) -> bytes:
+    return b + bytes(-len(b) % 4)
+
+
+def _mapi_one(base: int, v) -> bytes:
+    """Ein Wert: feste Typen auf 4 Byte aufgefüllt, variable mit Länge (ohne Anzahl)."""
+    import struct
+    if base in (PT_SHORT, PT_BOOLEAN):
+        return struct.pack("<H", int(v) & 0xFFFF) + b"\x00\x00"
+    if base == PT_LONG:
+        return struct.pack("<I", int(v) & 0xFFFFFFFF)
+    if base in (PT_SYSTIME, 0x0005, 0x0006, 0x0007, 0x0014):
+        return struct.pack("<Q", int(v))
+    if base == PT_CLSID:
+        return bytes(v)
+    if base == PT_UNICODE:
+        raw = v.encode("utf-16-le") + b"\x00\x00"
+    elif base == PT_STRING8:
+        raw = (v if isinstance(v, bytes) else v.encode("cp1252")) + b"\x00"
+    else:
+        raw = bytes(v)
+    return struct.pack("<I", len(raw)) + _pad4(raw)
+
+
+def mapi_props(props) -> bytes:
+    """MAPI-Eigenschaftsliste: [(Typ, Nummer, Wert)] oder (Typ, Nummer, Wert, (GUID, Nummer oder Name)) für
+    benannte Eigenschaften (Nummer ab 0x8000). Typ | MV: Wert ist eine Liste."""
+    import struct
+    out = struct.pack("<I", len(props))
+    for p in props:
+        ptype, pid, value = p[:3]
+        out += struct.pack("<HH", ptype, pid)
+        if len(p) > 3:
+            guid, ident = p[3]
+            out += guid
+            if isinstance(ident, int):
+                out += struct.pack("<II", 0, ident)
+            else:
+                name = ident.encode("utf-16-le") + b"\x00\x00"
+                out += struct.pack("<II", 1, len(name)) + _pad4(name)
+        base = ptype & ~MV
+        if ptype & MV:
+            out += struct.pack("<I", len(value)) + b"".join(_mapi_one(base, x) for x in value)
+        elif base in (PT_UNICODE, PT_STRING8, PT_BINARY, PT_OBJECT):
+            out += struct.pack("<I", 1) + _mapi_one(base, value)
+        else:
+            out += _mapi_one(base, value)
+    return out
+
+
+def tnef_attachment(data: bytes | None, name: str, *, variant: str = "A", title: str | None = None,
+                    mime: str | None = None, cid: str | None = None, method: int = 1, metafile: bool = False,
+                    dates: bool = False, rend: bool = True, data_in_props: bool = False, embedded: bytes | None = None,
+                    ole: bytes | None = None, name8: bool = False, extra=()) -> bytes:
+    """Ein Anhang (Ebene 2). variant A: Datei (Name in 0x3707/0x3001/0x3704), B: inline (MIME-Tag, Content-ID,
+    Kennzeichen 4, versteckt), C: minimal (Name nur in 0x3704). attAttachTitle hat „?“ statt Umlauten."""
+    import struct
+    out = b""
+    if rend:
+        out += tnef_attr(2, 0x00069002, struct.pack("<HIHHI", 1, 0xFFFFFFFF, 0, 0, 0))
+    if data is not None and not data_in_props:
+        out += tnef_attr(2, 0x0006800F, data)
+    t = title if title is not None else "".join(c if ord(c) < 128 else "?" for c in name)
+    out += tnef_attr(2, 0x00018010, t.encode("ascii", "replace") + b"\x00")
+    if metafile:
+        out += tnef_attr(2, 0x00068011, b"\x01\x00\x09\x00\x00\x03" + bytes(200))
+    if dates:
+        out += tnef_attr(2, 0x00038012, bytes(14)) + tnef_attr(2, 0x00038013, bytes(14))
+    s = PT_STRING8 if name8 else PT_UNICODE
+    ext = ("." + name.rsplit(".", 1)[-1]) if "." in name else ""
+    props = [(PT_LONG, 0x0E21, 1), (PT_BINARY, 0x0FF9, bytes(range(16))), (PT_LONG, 0x0FFE, 7)]
+    if variant in ("A", "B"):
+        props += [(s, 0x3001, name), (PT_LONG, 0x340D, 0x40000), (s, 0x3703, ext), (s, 0x3704, "ANHANG~1" + ext[:4]),
+                  (PT_LONG, 0x3705, method), (s, 0x3707, name)]
+        if variant == "A":
+            props += [(PT_BINARY, 0x3709, b"\x01\x00\x09\x00"), (PT_LONG, 0x370B, -1), (PT_LONG, 0x3714, 0),
+                      (PT_BOOLEAN, 0x7FFE, False)]
+        else:
+            props += [(PT_LONG, 0x370B, -1), (s, 0x370E, mime or "image/png"),
+                      (s, 0x3712, cid or "image001.png@01DA0000.00000000"), (PT_LONG, 0x3714, 4),
+                      (PT_BOOLEAN, 0x7FFE, True)]
+    else:
+        props += [(PT_LONG, 0x340D, 0x40000), (s, 0x3704, name), (PT_LONG, 0x3705, method), (PT_LONG, 0x370B, -1)]
+        if cid:
+            props.append((s, 0x3712, cid))
+    if data_in_props and data is not None:
+        props.append((PT_BINARY, 0x3701, data))
+    if embedded is not None:
+        props.append((PT_OBJECT, 0x3701, IID_IMESSAGE + embedded))
+    if ole is not None:
+        props.append((PT_OBJECT, 0x3701, IID_ISTORAGE + ole))
+    props += list(extra)
+    out += tnef_attr(2, 0x00069005, mapi_props(props))
+    return out
+
+
+def tnef_bytes(attachments=(), *, codepage: int = 28591, subject: str = "Rechnung Juli",
+               message_class: str = "IPM.Microsoft Mail.Note", body: str | None = None, html: bytes | None = None,
+               rtf: bytes | None = None, named: bool = True, recipients: bool = True, extra_props=(),
+               key: int = 0) -> bytes:
+    """winmail.dat: die neun Nachrichten-Attribute wie im Bestand, attMsgProps (mit benannten Eigenschaften, eine
+    davon mit ungerader Zeichenzahl), Empfängertabelle, danach die Anhänge (fertige Bytes aus tnef_attachment)."""
+    import struct
+    codec = {28591: "latin-1", 65001: "utf-8"}.get(codepage, "cp1252")
+    out = TNEF_SIG + struct.pack("<H", key)
+    out += tnef_attr(1, 0x00089006, b"\x00\x00\x01\x00")
+    out += tnef_attr(1, 0x00069007, struct.pack("<II", codepage, 0))
+    out += tnef_attr(1, 0x00078008, message_class.encode("ascii") + b"\x00")
+    out += tnef_attr(1, 0x0004800D, b"\x02\x00")
+    out += tnef_attr(1, 0x00018004, subject.encode(codec, "replace") + b"\x00")
+    out += tnef_attr(1, 0x00038020, bytes(14))
+    out += tnef_attr(1, 0x00018009, b"0123456789ABCDEF0123456789ABCDEF\x00")
+    prop_class = "IPM.Note" if message_class == "IPM.Microsoft Mail.Note" else message_class
+    props = [(PT_BOOLEAN, 0x0E1F, True), (PT_LONG, 0x1016, 3), (PT_LONG, 0x3FDE, codepage),
+             (PT_UNICODE, 0x0037, subject), (PT_UNICODE, 0x001A, prop_class), (PT_SYSTIME, 0x0039, 0)]
+    if named:
+        props += [(PT_LONG, 0x8000, 1, (PSETID_COMMON, 0x8510)),
+                  (PT_UNICODE, 0x8001, "Mustertext", (PS_PUBLIC_STRINGS, "Objektnr")),   # 8 Zeichen + NUL
+                  (PT_BOOLEAN, 0x8002, False, (PS_PUBLIC_STRINGS, "Abc")),
+                  (PT_UNICODE | MV, 0x8003, ["eins", "zwei"], (PS_PUBLIC_STRINGS, "Liste")),
+                  (PT_CLSID, 0x8004, bytes(16), (PSETID_COMMON, 0x8582))]
+    if body is not None:
+        props.append((PT_UNICODE, 0x1000, body))
+    if html is not None:
+        props.append((PT_BINARY, 0x1013, html))
+    if rtf is not None:
+        props.append((PT_BINARY, 0x1009, rtf))
+    props += list(extra_props)
+    out += tnef_attr(1, 0x00069003, mapi_props(props))
+    if recipients:
+        row = mapi_props([(PT_UNICODE, 0x3001, "Hausverwaltung Nord"), (PT_UNICODE, 0x39FE, "info@hv-nord.example"),
+                          (PT_LONG, 0x0C15, 1)])
+        out += tnef_attr(1, 0x00069004, struct.pack("<I", 1) + row)
+    return out + b"".join(attachments)
+
+
+def lzfu(rtf: bytes) -> bytes:
+    """RTF als PR_RTF_COMPRESSED (LZFu nur mit Literalen und Endmarke – gültig, nur nicht kleiner)."""
+    import struct
+    import zlib
+    tokens = [bytes([b]) for b in rtf]
+    end = ((207 + len(rtf)) & 0xFFF) << 4
+    tokens.append(struct.pack(">H", end))
+    body = bytearray()
+    for i in range(0, len(tokens), 8):
+        run = tokens[i:i + 8]
+        body.append(sum(1 << k for k, t in enumerate(run) if len(t) == 2))
+        body += b"".join(run)
+    crc = zlib.crc32(bytes(body), 0xFFFFFFFF) ^ 0xFFFFFFFF
+    return struct.pack("<IIII", len(body) + 12, len(rtf), 0x75465A4C, crc) + bytes(body)
+
+
+def mela(rtf: bytes) -> bytes:
+    """RTF unkomprimiert („MELA“)."""
+    import struct
+    return struct.pack("<IIII", len(rtf) + 12, len(rtf), 0x414C454D, 0) + rtf
+
+
+def html_rtf(paragraphs: list[str]) -> bytes:
+    """Aus HTML gekapseltes RTF (\\fromhtml1, MS-OXRTFEX), wie es Outlook schreibt."""
+    def esc(s: str) -> str:
+        out = []
+        for c in s:
+            if c in "\\{}":
+                out.append("\\" + c)
+            elif ord(c) < 128:
+                out.append(c)
+            elif c.encode("cp1252", "ignore"):
+                out.append("\\'%02x" % c.encode("cp1252")[0])
+            else:
+                out.append("\\u%d?" % ord(c))
+        return "".join(out)
+    body = "".join("{\\*\\htmltag64 <p class=MsoNormal>}\\htmlrtf {\\htmlrtf0 " + esc(p)
+                   + "{\\*\\htmltag244 <o:p>}{\\*\\htmltag252 </o:p>}\\htmlrtf }\\htmlrtf0 \\htmlrtf\\par}"
+                   "\\htmlrtf0{\\*\\htmltag72 </p>}\r\n" for p in paragraphs)
+    return ("{\\rtf1\\ansi\\ansicpg1252\\fromhtml1 \\fbidis \\deff0{\\fonttbl{\\f0\\fswiss Arial;}"
+            "{\\f1\\fmodern Courier New;}}{\\colortbl\\red0\\green0\\blue0;}\r\n{\\*\\htmltag19 <html>}"
+            "{\\*\\htmltag34 <head>}{\\*\\htmltag177 <style>p \\{color:red\\}</style>}{\\*\\htmltag41 </head>}"
+            "{\\*\\htmltag50 <body lang=DE>}\\htmlrtf \\lang1031 \\htmlrtf0 \r\n" + body
+            + "{\\*\\htmltag58 </body>}{\\*\\htmltag27 </html>}}").encode("ascii")
