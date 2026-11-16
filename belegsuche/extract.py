@@ -65,7 +65,7 @@ class PageText:
 class PartInfo:
     """Ein Teil einer E-Mail (Tabelle parts): 0 = Mailkopf + Mailtext, danach die Anhänge."""
     part_no: int
-    kind: str                 # body | pdf | image | word | text | mail | link | skipped
+    kind: str                 # body | pdf | image | word | text | mail | link | tnef (winmail.dat) | skipped
     first_page: int | None = None
     n_pages: int = 0
     name: str | None = None
@@ -431,6 +431,10 @@ def sniff(data: bytes) -> str | None:
     appledouble | tnef – oder None. Mail-Anhänge heißen oft application/octet-stream; die Angabe in der Mail
     und die Endung sind kein Beleg für den Inhalt."""
     head = bytes(data[:16])
+    if head.startswith(b"\x78\x9f\x3e\x22"):
+        # vor der Suche nach „%PDF-“ hinter einem Vorspann: eine kleine winmail.dat, deren erster Anhang ein PDF
+        # ist, hat „%PDF-“ in den ersten 1024 Bytes
+        return "tnef"
     if head.startswith(b"%PDF") or _pdf_after_preamble(bytes(data[:1024])):
         return "pdf"
     if head.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -456,8 +460,6 @@ def sniff(data: bytes) -> str | None:
         return "rtf"
     if head.startswith((b"\x00\x05\x16\x07", b"\x00\x05\x16\x00")):
         return "appledouble"
-    if head.startswith(b"\x78\x9f\x3e\x22"):
-        return "tnef"
     return None
 
 

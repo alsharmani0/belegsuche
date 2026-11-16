@@ -285,12 +285,13 @@ function tile(h) {
 }
 
 // „Anhang 2 · Rechnung.pdf · Seite 3 von 5“ – nur, wenn die Fundstelle in einem Anhang liegt
-// (lange Namen gekürzt; der volle Name steht im Tooltip)
+// (lange Namen gekürzt; der volle Name steht im Tooltip); Anhang in einer winmail.dat: „… (aus winmail.dat)“
 function partLabel(h, full) {
   if (h.kind !== 'mail' || !(h.part_no > 0)) return '';
   let name = String(h.part_name || (h.part_kind === 'mail' ? 'Weitergeleitete Mail' : 'ohne Namen'));
   const cs = Array.from(name);                                   // nach Zeichen, nicht UTF-16-Einheiten
   if (!full && cs.length > 48) name = cs.slice(0, 30).join('') + '…' + cs.slice(-14).join('');
+  if (h.part_from) name += ` (aus ${String(h.part_from)})`;
   return `Anhang ${Number(h.part_no)} · ${name}` + (h.part_pages > 1 ? ` · Seite ${Number(h.part_page)} von ${Number(h.part_pages)}` : '');
 }
 

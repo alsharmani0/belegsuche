@@ -10,12 +10,21 @@ Anhänge werden an den ersten Bytes erkannt: die Mehrzahl heißt nur application
 („Die Datei '…' wurde in die Dokumentenverwaltung von DOMUS … verschoben“) werden am Inhalt erkannt: kein eigener
 Text, sondern ein Verweis (Teil 'link') auf die gleichnamige Datei im Vorgangsordner.
 
-Übliche Auslassungen (Signatur-Logos, winmail.dat, Excel, ZIP, zu große Anhänge, passwortgeschützte PDFs) sind
-kein Fehler der Mail: sie stehen als Hinweis am Teil (parts.note).
+Übliche Auslassungen (Signatur-Logos, Excel, ZIP, zu große Anhänge, passwortgeschützte PDFs) sind kein Fehler
+der Mail: sie stehen als Hinweis am Teil (parts.note).
+
+winmail.dat aus Outlook (TNEF, erkannt an den ersten Bytes, nicht am Namen) wird geöffnet (belegsuche.tnef): die
+winmail.dat bleibt ein Teil ohne Seiten (kind 'tnef', Hinweis „ausgewertet: 3 Anhänge“ oder der Grund), jeder
+Anhang darin wird ein eigener Teil und genauso gelesen wie ein Mail-Anhang. Eingebettete Outlook-Nachrichten
+darin sind wie angehängte Mails ein Teil 'mail' mit eigener Seite. Hat die Mail selbst keinen Text, aber die
+winmail.dat (PR_BODY, HTML oder RTF), ist das der Mailtext.
 
 mime_path: Lage eines Teils im MIME-Baum, wie IMAP-Abschnitte: „1“, „2.1“ … (1-basiert; eine Mail ohne
 multipart hat nur „1“). „/“ trennt die Ebene einer angehängten Mail: „3/1.2“ = in Teil 3 (eine Mail) deren
-Teil 1.2. find_part() findet den Teil darüber wieder.
+Teil 1.2. „!k“ = Anhang k (1-basiert, in der Reihenfolge im Strom, übersprungene Logos mitgezählt) der
+winmail.dat davor: „2!3“ = Anhang 3 der winmail.dat in Teil 2, „2!3!1“ = Anhang 1 einer eingebetteten
+Outlook-Nachricht (oder winmail.dat) dort, „3/2!1“ = winmail.dat in einer angehängten Mail, „2!3/1“ = Teil 1
+einer Mail (.eml) in der winmail.dat. find_part() findet den Teil darüber wieder.
 """
 from __future__ import annotations
 
@@ -35,15 +44,18 @@ from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from pathlib import Path
 
+from . import tnef
 from .extract import (IMAGE_KINDS, MAX_IMAGE_PAGES, MIN_CROP_PX, NOTE_PREFIX, Extracted, ExtractError, MailInfo,
                       PageText, PartInfo, _page_done, extract_image_bytes, extract_pdf, image_size, sniff)
 
 MAX_MAIL_BYTES = 200 * 1024 * 1024        # größere .eml: nur der Kopf
 MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024   # größere Anhänge werden nicht ausgewertet
+MAX_TNEF_BYTES = 100 * 1024 * 1024        # größere winmail.dat werden nicht geöffnet (Anhänge darin: wie oben)
 MAX_MAIL_PARTS = 60                       # höchstens so viele Anhänge je Mail
 MAX_MAIL_PAGES = MAX_IMAGE_PAGES          # Seiten je Mail insgesamt (wie bei mehrseitigen Bildern)
 MIN_INLINE_IMAGE_BYTES = 10 * 1024        # kleinere Bilder im Mailtext (Signatur-Logos) nicht erkennen
 MAX_DEPTH = 2                             # angehängte Mails in angehängten Mails: so tief
+MAX_TNEF_DEPTH = 2                        # winmail.dat bzw. eingebettete Outlook-Nachricht in einer winmail.dat
 PLACEHOLDER_MAX_BYTES = 1024
 MAX_TEXT_ATTACHMENT_BYTES = 5 * 1024 * 1024
 PLACEHOLDER_RE = re.compile(r"Die Datei '([^\n]+?)' wurde in die Dokumentenverwaltung von DOMUS (CRM|NAVI) verschoben")
@@ -60,6 +72,8 @@ ATTACH_LINE = "Anhänge: "
 LINK_LINE = "Anhang in DOMUS abgelegt: "
 NO_DATE_SUFFIX = "(Änderungsdatum der Datei – Mail ohne Datum)"
 DUPLICATE_NOTE = "gleicher Inhalt wie Anhang"
+TNEF_NAME = "winmail.dat"
+TNEF_READ = "ausgewertet"                 # Hinweis einer gelesenen winmail.dat: „ausgewertet: 3 Anhänge“
 EVALUATED_KINDS = ("pdf", "image", "word", "text", "mail")
 REUSABLE_KINDS = ("pdf", "image", "word")   # Seiten 1:1 übertragbar (gleicher Inhalt = gleiche Seiten)
 
@@ -387,9 +401,12 @@ def _filename(part: Message) -> str:
                 name = name[2]
         except Exception:
             name = None
-    # nur der Dateiname, kein Pfad
-    name = clean(name).replace("\\", "/").rsplit("/", 1)[-1] if name else ""
-    return name
+    return _plain_name(name)
+
+
+def _plain_name(name: str | None) -> str:
+    """Nur der Dateiname, kein Pfad; ohne Steuerzeichen, Unicode NFC."""
+    return clean(name).replace("\\", "/").rsplit("/", 1)[-1] if name else ""
 
 
 def _disposition(part: Message) -> str | None:
@@ -462,16 +479,22 @@ def _placeholder_name(data: bytes) -> str | None:
 
 @dataclass
 class _Att:
-    part: Message
+    part: Message | None              # None: Anhang in einer winmail.dat
     path: str
     name: str
     mime: str
     inline: bool
     data: bytes
-    kind: str                         # pdf | image | word | text | mail | link | skipped | ignore
+    kind: str                         # pdf | image | word | text | mail | link | tnef | skipped | ignore
     note: str | None = None
     link: str | None = None           # DOMUS-Platzhalter: genannter Dateiname
     _sha: str | None = None
+    charset: str | None = None        # Zeichensatz laut Mail (Textanhänge)
+    hint: str | None = None           # zusätzlicher Hinweis am Teil (z. B. Daten abgeschnitten)
+    embedded: bool = False            # eingebettete Outlook-Nachricht (data ist ein TNEF-Strom)
+    tdepth: int = 1                   # bei kind 'tnef' und eingebetteten Nachrichten: Ebene des TNEF-Stroms
+    tnef_msg: tnef.Message | None = None  # gelesene winmail.dat (ohne Anhänge): Mailtext, falls die Mail keinen hat
+    inner: list[str] = field(default_factory=list)   # Namen der Anhänge in der winmail.dat (Anzeige)
 
     @property
     def sha(self) -> str:
@@ -533,7 +556,11 @@ def _classify(lf: _Leaf, depth: int) -> _Att:
             att.kind, att.note = "skipped", f"{NOT_EVALUATED} (zu tief verschachtelte Mail)"
         return att
     data = _payload(part)
-    att = _Att(part, lf.path, name, mime, inline, data, "skipped")
+    try:
+        charset = part.get_content_charset()
+    except Exception:
+        charset = None
+    att = _Att(part, lf.path, name, mime, inline, data, "skipped", charset=charset)
     low = name.lower()
     if mime in _SIGNATURE_TYPES or low in ("smime.p7s", "signature.asc"):
         att.kind = "ignore"
@@ -541,6 +568,13 @@ def _classify(lf: _Leaf, depth: int) -> _Att:
     if mime == "application/applefile":
         att.kind = "ignore"
         return att
+    return _classify_content(att, depth)
+
+
+def _classify_content(att: _Att, depth: int) -> _Att:
+    """Art eines Anhangs an seinen ersten Bytes (gilt für Mail-Anhänge und Anhänge in einer winmail.dat)."""
+    data, mime, inline = att.data, att.mime, att.inline
+    low = att.name.lower()
     if not data:
         att.note = "leer (0 Byte)"
         return att
@@ -577,7 +611,10 @@ def _classify(lf: _Leaf, depth: int) -> _Att:
         else:
             att.note = f"{NOT_EVALUATED} (Office- oder Outlook-Datei)"
     elif magic == "tnef":
-        att.note = f"{NOT_EVALUATED} (winmail.dat aus Outlook)"
+        att.kind = "tnef"
+        att.name = att.name or TNEF_NAME
+        if len(att.data) > MAX_TNEF_BYTES:
+            att.note = f"{NOT_EVALUATED} (zu groß: {len(att.data) / (1024 * 1024):.0f} MB)"
     elif low.endswith(".eml") or (mime in ("application/octet-stream", "text/plain") and _looks_like_mail(data)
                                   and not low.endswith(_TEXT_EXT)):
         att.kind = "mail"
@@ -616,9 +653,158 @@ def _classify_safe(lf: _Leaf, depth: int) -> _Att:
         return _Att(lf.part, lf.path, "", mime, False, b"", "skipped", note=f"nicht lesbar ({type(e).__name__})")
 
 
+# --- winmail.dat (TNEF) ------------------------------------------------------------------------------------
+
+def _tnef_child(parent: _Att, ta: tnef.Attachment, k: int, depth: int) -> _Att:
+    """Anhang k einer winmail.dat (bzw. eingebetteten Outlook-Nachricht) als _Att, an den ersten Bytes erkannt wie
+    ein Mail-Anhang. Inline (Content-ID, Kennzeichen „MHTML“, versteckt) wie ein Bild im Mailtext."""
+    name = _plain_name(ta.name)
+    mime = (clean(ta.mime).lower() if ta.mime else "") or "application/octet-stream"
+    a = _Att(None, f"{parent.path}!{k}", name, mime, ta.inline, ta.data or b"", "skipped", tdepth=parent.tdepth + 1)
+    if ta.truncated:
+        a.hint = "unvollständig (winmail.dat abgeschnitten)"
+    if ta.embedded:
+        a.name, a.embedded = name or "Outlook-Nachricht", True
+        if depth >= MAX_DEPTH or parent.tdepth >= MAX_TNEF_DEPTH:
+            a.note = f"{NOT_EVALUATED} (zu tief verschachtelte Nachricht)"
+        elif not a.data.startswith(tnef.SIGNATURE):
+            a.note = "nicht lesbar (eingebettete Outlook-Nachricht)"
+        elif len(a.data) > MAX_ATTACHMENT_BYTES:
+            a.note = f"{NOT_EVALUATED} (zu groß: {len(a.data) / (1024 * 1024):.0f} MB)"
+        else:
+            a.kind = "mail"
+        return a
+    if ta.data is None:
+        by_ref = ta.method not in (None, tnef.ATTACH_BY_VALUE, tnef.ATTACH_EMBEDDED_MSG, tnef.ATTACH_OLE)
+        a.note = f"{NOT_EVALUATED} (Verweis auf eine Datei, ohne Inhalt)" if by_ref else "leer (0 Byte)"
+        return a
+    if mime in _SIGNATURE_TYPES or name.lower() in ("smime.p7s", "signature.asc"):
+        a.kind = "ignore"
+        return a
+    _classify_content(a, depth)
+    if a.kind == "tnef" and not a.note and parent.tdepth >= MAX_TNEF_DEPTH:
+        a.note = f"{NOT_EVALUATED} (zu tief verschachtelte winmail.dat)"
+    return a
+
+
+def _tnef_child_safe(parent: _Att, ta: tnef.Attachment, k: int, depth: int) -> _Att:
+    try:
+        return _tnef_child(parent, ta, k, depth)
+    except MemoryError:
+        raise
+    except Exception as e:            # kaputter Anhang: nur dieser fehlt
+        return _Att(None, f"{parent.path}!{k}", _plain_name(ta.name), "application/octet-stream", False, b"",
+                    "skipped", note=f"nicht lesbar ({type(e).__name__})")
+
+
+def _tnef_children(att: _Att, depth: int) -> tuple[tnef.Message, list[_Att]]:
+    """Gelesene winmail.dat (bzw. eingebettete Nachricht) und ihre Anhänge in der Reihenfolge im Strom – auch die,
+    die nicht gelesen werden (Logos): Anhang k hat die Adresse „<Teil>!k“."""
+    msg = tnef.parse(att.data)
+    return msg, [_tnef_child_safe(att, ta, k, depth) for k, ta in enumerate(msg.attachments, 1)]
+
+
+def _tnef_note(msg: tnef.Message, n: int, ignored: int) -> str:
+    if n:
+        note = f"{TNEF_READ}: {n} Anhang" if n == 1 else f"{TNEF_READ}: {n} Anhänge"
+    elif ignored:
+        note = f"{TNEF_READ}: nur Bilder im Mailtext (Logos), keine Anhänge"
+    else:
+        note = f"{TNEF_READ}: keine Anhänge (nur Formatierung)"
+    if (msg.message_class or "").upper().startswith("IPM.NOTE.SMIME"):
+        note += "; verschlüsselte Outlook-Nachricht (S/MIME)"
+    if msg.notes:
+        note += "; " + "; ".join(dict.fromkeys(msg.notes))
+    return note
+
+
+def _expand_tnef(att: _Att, depth: int) -> list[_Att]:
+    """winmail.dat bzw. eingebettete Outlook-Nachricht öffnen: [sie selbst, ihre Anhänge …]. Eine winmail.dat in der
+    winmail.dat wird (bis MAX_TNEF_DEPTH) gleich mit geöffnet, Logos fallen weg. Hinweis am Container: wie viele
+    Anhänge, was am Strom nicht stimmte."""
+    if att.note:                          # zu groß, zu tief: nicht geöffnet
+        return [att]
+    msg, kids = _tnef_children(att, depth)
+    out: list[_Att] = []
+    ignored = 0
+    for kid in kids:
+        if kid.kind == "tnef":
+            out.extend(_expand_tnef_safe(kid, depth))
+        elif kid.kind == "ignore":
+            ignored += 1
+        else:
+            out.append(kid)
+    msg.attachments = []                  # die Inhalte gehören jetzt den Teilen (Speicher früh freigeben)
+    att.tnef_msg = msg
+    att.inner = [a.name for a in out if a.name and a.kind != "link"]
+    att.note = _tnef_note(msg, len(kids) - ignored, ignored)
+    if not msg.signature_ok or not msg.n_attributes:      # gar nichts lesbar
+        att.note = "nicht lesbar (" + ("; ".join(msg.notes) or "leer") + ")"
+    return [att, *out]
+
+
+def _expand_tnef_safe(att: _Att, depth: int) -> list[_Att]:
+    try:
+        return _expand_tnef(att, depth)
+    except MemoryError:
+        raise
+    except Exception as e:
+        att.note = f"nicht lesbar ({type(e).__name__})"
+        return [att]
+
+
+def _tnef_shas(att: _Att, depth: int) -> list[str]:
+    """sha256 der Anhänge in einer winmail.dat, deren Seiten sich übernehmen lassen (wie _shas_of)."""
+    if att.note:
+        return []
+    out: list[str] = []
+    for kid in _tnef_children(att, depth)[1]:
+        if kid.kind in REUSABLE_KINDS:
+            out.append(kid.sha)
+        elif kid.kind == "tnef":
+            out.extend(_tnef_shas(kid, depth))
+        elif kid.kind == "mail" and kid.embedded:
+            out.extend(_tnef_shas(kid, depth + 1))
+        elif kid.kind == "mail":
+            out.extend(_shas_of(_parse_fast(kid.data), depth + 1))
+    return out
+
+
+_ALNUM_RE = re.compile(r"[^\W_]")
+
+
+def _usable(text: str) -> bool:
+    """Brauchbarer Mailtext: mindestens drei Buchstaben oder Ziffern (nicht leer, nicht nur Leerzeichen/Zeichen)."""
+    return sum(1 for _ in zip(range(3), _ALNUM_RE.finditer(text))) >= 3
+
+
+def _tnef_body(att: _Att) -> str:
+    """Mailtext aus einer gelesenen winmail.dat (PR_BODY, HTML oder RTF) – leer, wenn sie keinen hat."""
+    msg = att.tnef_msg
+    if msg is None:
+        return ""
+    before = len(msg.notes)
+    res = msg.text()
+    if len(msg.notes) > before and att.note:
+        att.note = "; ".join([att.note, *msg.notes[before:]])
+    if res is None:
+        return ""
+    kind, content = res
+    text = html_to_text(content) if kind == "html" else content.replace("\r\n", "\n").replace("\r", "\n")
+    return text.strip()
+
+
 def _attachments(msg: Message, leaves: list[_Leaf], used: set[int], depth: int) -> list[_Att]:
-    return [att for lf in leaves if id(lf.part) not in used and lf.text is None
-            for att in [_classify_safe(lf, depth)] if att.kind != "ignore"]
+    out: list[_Att] = []
+    for lf in leaves:
+        if id(lf.part) in used or lf.text is not None:
+            continue
+        att = _classify_safe(lf, depth)
+        if att.kind == "tnef":
+            out.extend(_expand_tnef_safe(att, depth))
+        elif att.kind != "ignore":
+            out.append(att)
+    return out
 
 
 def parse(data: bytes) -> Message:
@@ -661,6 +847,8 @@ def _shas_of(msg: Message, depth: int) -> list[str]:
             out.append(att.sha)
         elif att.kind == "mail":
             out.extend(_shas_of(_parse_fast(att.data), depth + 1))
+        elif att.kind == "tnef":
+            out.extend(_tnef_shas(att, depth))
     return out
 
 
@@ -700,16 +888,38 @@ def _resolve(msg: Message, seg: str) -> Message | None:
     return part
 
 
+def _tnef_step(att: _Att, k: str) -> _Att | None:
+    """Anhang k der winmail.dat bzw. eingebetteten Nachricht `att` (Adresse „…!k“)."""
+    if not k.isdigit() or not att.data.startswith(tnef.SIGNATURE):
+        return None
+    kids = _tnef_children(att, 0)[1]
+    i = int(k) - 1
+    return kids[i] if 0 <= i < len(kids) else None
+
+
 def find_part(data: bytes, mime_path: str) -> bytes | None:
-    """Inhalt (dekodiert) des Teils an mime_path (parts.mime_path) – zum Öffnen eines Anhangs.
-    None, wenn es ihn nicht gibt. Vor dem Öffnen die sha256 mit parts.sha256 vergleichen."""
+    """Inhalt (dekodiert) des Teils an mime_path (parts.mime_path) – zum Öffnen eines Anhangs, auch eines Anhangs in
+    einer winmail.dat („2!3“). None, wenn es ihn nicht gibt. Vor dem Öffnen die sha256 mit parts.sha256 vergleichen."""
     try:
         msg = parse(data)
         segs = mime_path.split("/")
         for n, seg in enumerate(segs):
+            seg, *steps = seg.split("!")
             part = _resolve(msg, seg)
             if part is None:
                 return None
+            if steps:
+                att = _classify(_Leaf(part, seg), 0)
+                for k in steps:
+                    att = _tnef_step(att, k)
+                    if att is None:
+                        return None
+                if n == len(segs) - 1:
+                    return att.data
+                if att.kind != "mail" or att.embedded:   # nur eine Mail (.eml) hat Teile hinter „/“
+                    return None
+                msg = parse(att.data)
+                continue
             if n == len(segs) - 1:
                 return _classify(_Leaf(part, seg), 0).data
             if part.get_content_type() == "message/rfc822" and _encoded_rfc822(part) is None:
@@ -741,6 +951,8 @@ class _Ctx:
 
     def add_part(self, att: _Att, kind: str, pages: list[PageText], note: str | None, prefix: str,
                  name: str | None = None) -> PartInfo:
+        if att.hint:
+            note = f"{note}; {att.hint}" if note else att.hint
         first = len(self.pages) + 1 if pages else None
         for p in pages:
             self.pages.append(PageText(len(self.pages) + 1, p.text, p.source, p.ocr_conf))
@@ -805,6 +1017,9 @@ def _read_attachment(att: _Att, ctx: _Ctx, depth: int, prefix: str, folder: _Fol
     if att.kind == "link":
         ctx.add_part(att, "link", [], folder.find(att.link), prefix, name=att.link)
         return
+    if att.kind == "tnef":                # winmail.dat: Teil ohne Seiten, ihre Anhänge folgen als eigene Teile
+        ctx.add_part(att, "tnef", [], att.note, prefix)
+        return
     if att.kind not in EVALUATED_KINDS:
         ctx.add_part(att, "skipped", [], att.note or NOT_EVALUATED, prefix)
         return
@@ -819,7 +1034,10 @@ def _read_attachment(att: _Att, ctx: _Ctx, depth: int, prefix: str, folder: _Fol
         ctx.add_part(att, att.kind, [], f"{NOT_EVALUATED} (Seitenlimit der Mail erreicht)", prefix)
         return
     if att.kind == "mail":
-        info = _read_nested(att, ctx, depth + 1, prefix, folder)
+        if att.embedded:
+            info = _read_embedded(att, ctx, depth + 1, prefix, folder)
+        else:
+            info = _read_nested(att, ctx, depth + 1, prefix, folder)
         ctx.seen.setdefault(sha, info.part_no)
         return
     known = ctx.known.get(sha) if att.kind in REUSABLE_KINDS else None
@@ -851,7 +1069,7 @@ def _read_attachment(att: _Att, ctx: _Ctx, depth: int, prefix: str, folder: _Fol
                     ctx.page_limit_hit = True
                     pages = pages[:room]
             else:   # text
-                t = _decode_bytes(att.data, att.part.get_content_charset())
+                t = _decode_bytes(att.data, att.charset)
                 if att.mime == "text/html" or att.name.lower().endswith((".htm", ".html")):
                     t = html_to_text(t)
                 pages = [PageText(1, t.replace("\r\n", "\n").replace("\r", "\n").strip(), "text")]
@@ -880,8 +1098,14 @@ def _read_message(msg: Message, ctx: _Ctx, depth: int, prefix: str, folder: _Fol
     leaves = _leaves(msg)
     body, used = _body_text(msg, leaves)
     atts = _attachments(msg, leaves, used, depth)
+    if not _usable(body):
+        # Mail ohne eigenen Text (Outlook mit TNEF): der Mailtext steht nur in der winmail.dat
+        for a in atts:
+            if a.kind == "tnef" and (t := _tnef_body(a)):
+                body = t
+                break
     lines = list(head.lines)
-    names = [a.name for a in atts if a.kind != "link" and a.name]
+    names = _attach_names(atts)
     if names:
         lines.append(ATTACH_LINE + ", ".join(dict.fromkeys(names)))
     for a in atts:
@@ -889,6 +1113,39 @@ def _read_message(msg: Message, ctx: _Ctx, depth: int, prefix: str, folder: _Fol
             lines.append(LINK_LINE + a.link)
     text = "\n".join(lines) + ("\n\n" + body if body else "")
     return head, text, atts
+
+
+def _attach_names(atts: list[_Att]) -> list[str]:
+    """Namen der Anhänge für die Zeile „Anhänge: …“; Anhänge in einer winmail.dat in Klammern dahinter."""
+    inside = tuple(a.path + "!" for a in atts if a.kind == "tnef")
+    return [a.name + (f" ({', '.join(dict.fromkeys(a.inner))})" if a.inner else "")
+            for a in atts if a.kind != "link" and a.name and not (inside and a.path.startswith(inside))]
+
+
+def _read_embedded(att: _Att, ctx: _Ctx, depth: int, prefix: str, folder: _Folder) -> PartInfo:
+    """Eingebettete Outlook-Nachricht in einer winmail.dat: eigene Seite (Betreff, Absender, Text) wie eine
+    angehängte Mail, danach ihre Anhänge als weitere Teile („…!k!j“)."""
+    atts = _expand_tnef_safe(att, depth)[1:]
+    msg, why = att.tnef_msg, att.note
+    att.note = None
+    if msg is None:                       # nicht lesbar
+        return ctx.add_part(att, "mail", [], why, prefix)
+    lines = [f"Betreff: {clean(msg.subject)}" if clean(msg.subject) else "Betreff: (ohne Betreff)"]
+    if clean(msg.sender):
+        lines.append(f"Von: {clean(msg.sender)}")
+    names = _attach_names(atts)
+    if names:
+        lines.append(ATTACH_LINE + ", ".join(dict.fromkeys(names)))
+    body = _tnef_body(att)
+    text = "\n".join(lines) + ("\n\n" + body if body else "")
+    note = "; ".join(dict.fromkeys(msg.notes)) or None      # Mängel am Strom (Prüfsumme, abgeschnitten …)
+    info = ctx.add_part(att, "mail", [PageText(1, "Weitergeleitete Mail\n" + text, "text")], note, prefix)
+    _page_done()
+    for a in atts:
+        _read_attachment(a, ctx, depth, prefix, folder)
+        a.data = b""
+        _page_done()
+    return info
 
 
 def _read_nested(att: _Att, ctx: _Ctx, depth: int, prefix: str, folder: _Folder) -> PartInfo:

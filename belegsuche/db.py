@@ -14,10 +14,15 @@ from pathlib import Path
 SCHEMA_VERSION = 1
 # Format der Suchtexte (Zusatz-Tokens, Dokument-Index). Ändert es sich, wird der Suchindex aus den
 # gespeicherten Seitentexten neu aufgebaut – ohne neue Texterkennung.
-INDEX_FORMAT = "10"          # E-Mails: Mailkopf und Anhangname in der path-Spalte; Tabellen parts/mails
+INDEX_FORMAT = "11"          # 10: E-Mails (Tabellen parts/mails, Mailkopf in der path-Spalte); 11: winmail.dat gelesen
 # Von diesen Formaten aus ändern sich die vorhandenen Suchzeilen nicht: nur das Format vermerken, kein Neuaufbau
 # (der Index kann über 100.000 Seiten haben; die neuen Tabellen legt SCHEMA an)
-NO_REBUILD_FROM = {"9"}
+NO_REBUILD_FROM = {"9", "10"}
+# Teile, die eine frühere Version nur vermerkt hat und die diese Version liest (Format 10 → 11: winmail.dat). Mails
+# mit so einem Teil werden neu eingelesen (mark_outdated_mails); ihre übrigen Seiten übernimmt das Neulesen über die
+# sha256 der Anhänge, ohne neue Texterkennung.
+OUTDATED_PART_NOTES = ("nicht ausgewertet (winmail.dat aus Outlook)",)
+OUTDATED_IN_SQL = "(" + ", ".join("?" * len(OUTDATED_PART_NOTES)) + ")"
 FILE_TOKEN = "0f"            # + files.id, steht in der path-Spalte jeder Seite
 # Dateien, die Suche und Oberfläche anzeigen und öffnen: fertig eingelesen – oder seitdem geändert und noch
 # nicht neu eingelesen (bis dahin gilt der bisherige Text; er wird erst beim Neu-Einlesen ersetzt)
@@ -82,12 +87,12 @@ CREATE TABLE IF NOT EXISTS parts (
     part_no    INTEGER NOT NULL,
     first_page INTEGER,                 -- NULL, wenn der Teil keine eigenen Seiten hat
     n_pages    INTEGER NOT NULL DEFAULT 0,
-    kind       TEXT NOT NULL,           -- body | pdf | image | word | text | mail | link | skipped
+    kind       TEXT NOT NULL,           -- body | pdf | image | word | text | mail | link | tnef | skipped
     name       TEXT,
     mime       TEXT,
     size       INTEGER,
     sha256     TEXT,
-    mime_path  TEXT,                    -- Lage im MIME-Baum (siehe mail.find_part)
+    mime_path  TEXT,                    -- Lage im MIME-Baum, „!k“ = Anhang k einer winmail.dat (mail.find_part)
     note       TEXT,                    -- Hinweis (zu groß, nicht ausgewertet …); bei 'link': Pfad der Datei
     PRIMARY KEY (file_id, part_no)
 );
@@ -171,11 +176,29 @@ def connect(path: Path, readonly: bool = False) -> sqlite3.Connection:
                     print("Suchindex wird auf das neue Format umgestellt (einmalig, ohne neue Texterkennung) …",
                           file=sys.stderr)
                     rebuild_search_index(con)
+                mark_outdated_mails(con)
             con.commit()
         return con
     except BaseException:
         con.close()
         raise
+
+
+def mark_outdated_mails(con: sqlite3.Connection) -> int:
+    """Fertige Mails, die ein Teil aus einer früheren Version enthalten (OUTDATED_PART_NOTES, z. B. eine nur
+    vermerkte winmail.dat), zum Neueinlesen vormerken. Ihr bisheriger Text bleibt bis dahin durchsuchbar.
+    Wiederholbar: neu eingelesene Mails haben solche Teile nicht mehr. Rückgabe: Anzahl."""
+    if not has_table(con, "parts"):
+        return 0
+    return con.execute(f"UPDATE files SET status = 'pending', attempts = 0 WHERE status = 'done' AND id IN"
+                       f" (SELECT file_id FROM parts WHERE note IN {OUTDATED_IN_SQL})",
+                       OUTDATED_PART_NOTES).rowcount
+
+
+def has_outdated_parts(con: sqlite3.Connection, file_id: int) -> bool:
+    """Hat die Datei einen Teil, den eine frühere Version nur vermerkt hat (dann gilt ihr Stand nicht weiter)?"""
+    return con.execute(f"SELECT 1 FROM parts WHERE file_id = ? AND note IN {OUTDATED_IN_SQL} LIMIT 1",
+                       (file_id, *OUTDATED_PART_NOTES)).fetchone() is not None
 
 
 def delete_search_rows(con: sqlite3.Connection, file_id: int) -> None:

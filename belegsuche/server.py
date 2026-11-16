@@ -449,7 +449,8 @@ def make_handler(searcher: Searcher, port: int, attachments: AttachmentTemp | No
                         "matched": h.matched, "missing": h.missing, "ocr": h.ocr, "available": h.available,
                         "duplicates": h.duplicates, "pdf": h.filename.lower().endswith(".pdf"),
                         "outdated": h.outdated, "kind": h.kind, "part_no": h.part_no, "part_name": h.part_name,
-                        "part_kind": h.part_kind, "part_page": h.part_page, "part_pages": h.part_pages,
+                        "part_kind": h.part_kind, "part_from": h.part_from, "part_page": h.part_page,
+                        "part_pages": h.part_pages,
                         "mail_subject": h.mail_subject, "mail_from": h.mail_from, "mail_date": h.mail_date,
                         "links": h.links,
                     } for h in resp.hits]})

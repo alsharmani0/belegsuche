@@ -78,7 +78,7 @@ def test_format_9_is_upgraded_without_rebuilding_the_search_index(tmp_path, monk
 
     monkeypatch.setattr(dbm, "rebuild_search_index", no_rebuild)
     con = dbm.connect(db)
-    assert dbm.get_meta(con, "index_format") == dbm.INDEX_FORMAT == "10"
+    assert dbm.get_meta(con, "index_format") == dbm.INDEX_FORMAT == "11"
     assert dbm.has_table(con, "parts") and dbm.has_table(con, "mails")
     con.close()
     from belegsuche.search import Searcher
@@ -93,7 +93,7 @@ def test_older_format_still_rebuilds_and_newer_is_rejected(tmp_path, monkeypatch
     dbm.connect(db).close()
     assert calls == [1]
     con = dbm.connect(db)
-    dbm.set_meta(con, "index_format", "11")
+    dbm.set_meta(con, "index_format", "12")
     con.commit()
     con.close()
     with pytest.raises(dbm.IncompatibleIndexError, match="neuer"):
@@ -328,8 +328,10 @@ def test_signatures_appledouble_and_unsupported_attachments(tmp_path):
     ])
     res = extract_full(p, BytesEngine())
     assert [(t.name, t.kind, t.n_pages) for t in res.parts[1:]] == [
-        ("winmail.dat", "skipped", 0), ("Liste.xlsx", "skipped", 0), ("Video.mov", "skipped", 0)]
-    assert all(t.note.startswith("nicht ausgewertet") for t in res.parts[1:])
+        ("winmail.dat", "tnef", 0), ("Liste.xlsx", "skipped", 0), ("Video.mov", "skipped", 0)]
+    # kaputte winmail.dat (nur die Kennung, danach Nullen): Hinweis am Teil, kein Fehler der Mail
+    assert res.parts[1].note.startswith("nicht lesbar (beschädigt")
+    assert all(t.note.startswith("nicht ausgewertet") for t in res.parts[2:])
     assert res.notes == []                                       # übliche Auslassungen: kein Hinweis an der Mail
 
 

@@ -186,7 +186,8 @@ def cmd_search(args) -> int:
             head = " · ".join(x for x in (h.mail_subject or "(ohne Betreff)", h.mail_from, h.mail_date) if x)
             print(f"    Mail: {_safe(head)}")
             if h.part_no:
-                print(f"    Anhang {h.part_no}: {_safe(h.part_name or '(ohne Namen)')}, "
+                origin = f" (aus {_safe(h.part_from)})" if h.part_from else ""
+                print(f"    Anhang {h.part_no}: {_safe(h.part_name or '(ohne Namen)')}{origin}, "
                       f"Seite {h.part_page}/{h.part_pages}")
             for link in h.links[:5]:
                 where = os.path.join(h.root, link["path"]) if link["path"] else "(nicht im Vorgangsordner)"

@@ -77,25 +77,30 @@ def _pages_list(nums: list[int]) -> str:
 
 
 def _part_labels(con, file_id: int):
-    """Seitennummer einer E-Mail -> „Anhang 2 Seite 1“ (Mailtext: „Mailtext“)."""
-    rows = con.execute("SELECT part_no, first_page, n_pages FROM parts WHERE file_id = ? AND n_pages > 0"
+    """Seitennummer einer E-Mail -> „Anhang 2 Seite 1“ (Mailtext: „Mailtext“; Anhang in einer winmail.dat:
+    „Anhang 3 (aus winmail.dat) Seite 1“)."""
+    rows = con.execute("SELECT part_no, first_page, n_pages, mime_path FROM parts WHERE file_id = ? AND n_pages > 0"
                        " AND first_page IS NOT NULL", (file_id,)).fetchall() if dbm.has_table(con, "parts") else []
 
     def label(page_no: int) -> str:
-        for part_no, first, n in rows:
+        for part_no, first, n, mime_path in rows:
             if first <= page_no < first + n:
-                return "Mailtext" if part_no == 0 else f"Anhang {part_no} Seite {page_no - first + 1}"
+                if part_no == 0:
+                    return "Mailtext"
+                origin = " (aus winmail.dat)" if "!" in (mime_path or "").rsplit("/", 1)[-1] else ""
+                return f"Anhang {part_no}{origin} Seite {page_no - first + 1}"
         return f"Seite {page_no}"
     return label
 
 
 def _attachment_stats(con) -> dict | None:
     """Mail-Anhänge fertig eingelesener Mails: ausgewertet, übernommen (gleicher Inhalt schon eingelesen),
-    DOMUS-Platzhalter, doppelt in derselben Mail und nicht ausgewertet (Logos zählen nicht, winmail.dat, Excel,
-    zu groß …)."""
+    DOMUS-Platzhalter, doppelt in derselben Mail und nicht ausgewertet (Logos zählen nicht, Excel, zu groß …).
+    Anhänge in einer winmail.dat zählen mit; die winmail.dat selbst zählt getrennt (tnef: ausgewertet, Anhänge
+    darin, nicht ausgewertet mit Grund)."""
     if not dbm.has_table(con, "parts"):
         return None
-    from .mail import DUPLICATE_NOTE, REUSED_NOTE
+    from .mail import DUPLICATE_NOTE, REUSED_NOTE, TNEF_READ
     dup = DUPLICATE_NOTE + " %"
     row = con.execute(
         "SELECT count(*) AS n,"
@@ -103,10 +108,26 @@ def _attachment_stats(con) -> dict | None:
         " coalesce(sum(t.n_pages > 0 AND t.note LIKE ? || '%'), 0) AS reused,"
         " coalesce(sum(t.kind = 'link'), 0) AS links,"
         " coalesce(sum(t.kind != 'link' AND t.n_pages = 0 AND coalesce(t.note, '') LIKE ?), 0) AS duplicates,"
-        " coalesce(sum(t.kind != 'link' AND t.n_pages = 0 AND coalesce(t.note, '') NOT LIKE ?), 0) AS skipped"
-        " FROM parts t JOIN files f ON f.id = t.file_id WHERE t.part_no > 0 AND f.status = 'done'",
+        " coalesce(sum(t.kind != 'link' AND t.n_pages = 0 AND coalesce(t.note, '') NOT LIKE ?), 0) AS skipped,"
+        " coalesce(sum(instr(coalesce(t.mime_path, ''), '!') > 0), 0) AS in_tnef"
+        " FROM parts t JOIN files f ON f.id = t.file_id WHERE t.part_no > 0 AND f.status = 'done'"
+        " AND t.kind != 'tnef'",
         (REUSED_NOTE, REUSED_NOTE, dup, dup)).fetchone()
-    return {k: row[k] for k in ("n", "evaluated", "reused", "links", "duplicates", "skipped")}
+    out = {k: row[k] for k in ("n", "evaluated", "reused", "links", "duplicates", "skipped", "in_tnef")}
+    tnef = {"n": 0, "read": 0, "not_read": {}}
+    for note, n in con.execute(
+            "SELECT t.note, count(*) FROM parts t JOIN files f ON f.id = t.file_id"
+            " WHERE t.part_no > 0 AND f.status = 'done' AND t.kind = 'tnef' GROUP BY t.note"):
+        tnef["n"] += n
+        if (note or "").startswith(TNEF_READ):
+            tnef["read"] += n
+        else:
+            why = re.sub(r"\s*\(.*$", "", note or "") if (note or "").startswith("nicht lesbar") else (note or "")
+            why = re.sub(r"^nicht ausgewertet \((.*)\)$", r"\1", why) or "ohne Angabe"
+            why = re.sub(r"zu groß: \d+ MB", "zu groß", why)
+            tnef["not_read"][why] = tnef["not_read"].get(why, 0) + n
+    out["tnef"] = tnef
+    return out
 
 
 def build_report(con) -> dict:
@@ -236,6 +257,12 @@ def format_report(r: dict, max_problems: int = 25) -> str:
         lines += ["", f"Mail-Anhänge: {att['evaluated']} ausgewertet, {att['reused']} übernommen (gleicher Inhalt), "
                       f"{att['links']} Platzhalter (in DOMUS abgelegt), {att['skipped']} nicht ausgewertet"
                       + (f", {att['duplicates']} doppelt in derselben Mail" if att.get("duplicates") else "")]
+    tn = (att or {}).get("tnef")
+    if tn and tn["n"]:
+        nr = sum(tn["not_read"].values())
+        why = ", ".join(f"{k} {v}" for k, v in sorted(tn["not_read"].items(), key=lambda kv: (-kv[1], kv[0])))
+        lines.append(f"winmail.dat (Outlook): {tn['read']} geöffnet, darin {att['in_tnef']} Anhänge (oben mitgezählt)"
+                     + (f"; {nr} nicht ausgewertet ({why})" if nr else ""))
     if r.get("broken_names"):
         names = r["broken_name_list"]
         lines += ["", f"Dateinamen mit beschädigten Umlauten: {r['broken_names']}  (beim Kopieren falsch übertragen? "

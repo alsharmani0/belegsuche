@@ -458,8 +458,9 @@ def _stored(con, file_id: int) -> Extracted:
 REUSE_KINDS = ("pdf", "image", "word")    # Anhänge, deren Seiten sich 1:1 von gleichem Inhalt übernehmen lassen
 
 
-def _pages_for_sha(con, sha: str) -> list[PageText] | None:
-    """Seiten eines schon eingelesenen Inhalts: als eigene Datei oder als Anhang einer fertigen Mail."""
+def _pages_for_sha(con, sha: str, own_id: int | None = None) -> list[PageText] | None:
+    """Seiten eines schon eingelesenen Inhalts: als eigene Datei oder als Anhang einer fertigen Mail – oder als
+    Anhang der Mail own_id selbst (sie wird gerade neu gelesen, z. B. weil ihre winmail.dat jetzt ausgewertet wird)."""
     row = con.execute(
         "SELECT f.id FROM files f WHERE f.sha256 = ? AND f.status IN ('done', 'missing') AND f.kind IN (?, ?, ?)"
         " AND EXISTS (SELECT 1 FROM pages p WHERE p.file_id = f.id) LIMIT 1", (sha, *REUSE_KINDS)).fetchone()
@@ -470,8 +471,8 @@ def _pages_for_sha(con, sha: str) -> list[PageText] | None:
     row = con.execute(
         "SELECT t.file_id, t.first_page, t.n_pages FROM parts t JOIN files f ON f.id = t.file_id"
         " WHERE t.sha256 = ? AND t.n_pages > 0 AND t.first_page IS NOT NULL AND t.kind IN (?, ?, ?)"
-        " AND (t.note IS NULL OR t.note = ?) AND f.status = 'done' LIMIT 1",
-        (sha, *REUSE_KINDS, REUSED_NOTE)).fetchone()
+        " AND (t.note IS NULL OR t.note = ?) AND (f.status = 'done' OR f.id = ?) LIMIT 1",
+        (sha, *REUSE_KINDS, REUSED_NOTE, own_id)).fetchone()
     if row:
         pages = _pages_of(con, row[0], row[1], row[1] + row[2] - 1)
         if len(pages) == row[2]:
@@ -489,7 +490,7 @@ def _pages_as_attachment(con, sha: str) -> list[PageText] | None:
         return None
 
 
-def _known_pages(con, full: str) -> tuple[dict[str, list[PageText]], frozenset[str]]:
+def _known_pages(con, full: str, own_id: int | None = None) -> tuple[dict[str, list[PageText]], frozenset[str]]:
     """E-Mail: Seiten der Anhänge, deren Inhalt schon eingelesen ist (sha256 -> Seiten). Der Arbeitsprozess
     übernimmt sie statt erneuter Texterkennung. Dazu die sha256 der übrigen Anhänge (noch zu lesen): Mails mit
     demselben Anhang warten im parallelen Lauf, bis er einmal gelesen ist. Nur ein Vorabblick: Fehler hier
@@ -502,7 +503,7 @@ def _known_pages(con, full: str) -> tuple[dict[str, list[PageText]], frozenset[s
             data = f.read()
         known, pending = {}, set()
         for sha in dict.fromkeys(attachment_shas(data)):
-            pages = _pages_for_sha(con, sha)
+            pages = _pages_for_sha(con, sha, own_id)
             if pages:
                 known[sha] = pages
             else:
@@ -619,23 +620,25 @@ def _prepare(con, r):
     s = os.stat(full)
     sha = sha256_file(full)
     none: frozenset[str] = frozenset()
-    # Ein Stand „nur Mailtext“ (Rückfall nach Zeitlimit/Absturz) wird nie übernommen: weder beim Wiederholen
-    # derselben Mail noch für eine gleiche Kopie – sonst fehlten die Anhänge dauerhaft
+    # Nie übernommen wird ein Stand „nur Mailtext“ (Rückfall nach Zeitlimit/Absturz) – weder beim Wiederholen
+    # derselben Mail noch für eine gleiche Kopie, sonst fehlten die Anhänge dauerhaft – und ein Stand einer früheren
+    # Version mit einem nur vermerkten Teil (winmail.dat vor Format 11)
     if r["sha256"] == sha and con.execute("SELECT 1 FROM pages WHERE file_id=? LIMIT 1", (fid,)).fetchone() \
-            and not con.execute("SELECT 1 FROM parts WHERE file_id=? AND note=? LIMIT 1", (fid, _safe_note())).fetchone():
+            and not con.execute("SELECT 1 FROM parts WHERE file_id=? AND note=? LIMIT 1", (fid, _safe_note())).fetchone() \
+            and not dbm.has_outdated_parts(con, fid):
         return s, sha, _stored(con, fid), True, None, none
     src = con.execute(
         "SELECT f.id FROM files f WHERE f.sha256 = ? AND f.id != ? AND f.status IN ('done', 'missing')"
         " AND EXISTS (SELECT 1 FROM pages p WHERE p.file_id = f.id)"
-        " AND NOT EXISTS (SELECT 1 FROM parts t WHERE t.file_id = f.id AND t.note = ?) LIMIT 1",
-        (sha, fid, _safe_note())).fetchone()
+        f" AND NOT EXISTS (SELECT 1 FROM parts t WHERE t.file_id = f.id AND (t.note = ? OR t.note IN {dbm.OUTDATED_IN_SQL}))"
+        " LIMIT 1", (sha, fid, _safe_note(), *dbm.OUTDATED_PART_NOTES)).fetchone()
     if src:
         res = _stored(con, src[0])
         if _is_mail(r):
             _relink(res, full, r["root"])
         return s, sha, res, True, None, none
     if _is_mail(r):
-        known, pending = _known_pages(con, full)
+        known, pending = _known_pages(con, full, fid)
         return s, sha, None, False, known, pending
     if pages := _pages_as_attachment(con, sha):
         return s, sha, Extracted(pages), True, None, none   # Inhalt schon als Mail-Anhang eingelesen
@@ -726,9 +729,14 @@ class _Progress:
             if res.reused_ocr_pages:
                 info += f", {res.reused_ocr_pages} OCR-Seiten übernommen"
         if not reused and res.mail is not None:
-            n_att = len(res.parts) - 1
+            # die winmail.dat selbst zählt nicht, ihre Anhänge schon (gekennzeichnet)
+            atts = [t for t in res.parts[1:] if t.kind != "tnef"]
+            n_att = len(atts)
+            n_tnef = sum(1 for t in atts if "!" in (t.mime_path or "").rsplit("/", 1)[-1])
             if n_att > 0:
                 info += f", {n_att} Anhang" if n_att == 1 else f", {n_att} Anhänge"
+                if n_tnef:
+                    info += " aus winmail.dat" if n_tnef == n_att else f" ({n_tnef} aus winmail.dat)"
         if chars == 0:
             info += ", KEIN TEXT"
         if note:
@@ -1249,6 +1257,16 @@ def check_temp_outside(roots) -> None:
                              "geschrieben. TMPDIR auf einen anderen Ordner setzen.")
 
 
+def _count_outdated(con, root_ids: list[int] | None) -> int:
+    """Offene Mails mit einem Teil aus einer früheren Version (werden in diesem Lauf neu gelesen)."""
+    if not dbm.has_table(con, "parts"):
+        return 0
+    scope, args = _root_scope(root_ids)
+    return con.execute(f"SELECT count(*) FROM files WHERE status = 'pending'{scope} AND id IN"
+                       f" (SELECT file_id FROM parts WHERE note IN {dbm.OUTDATED_IN_SQL})",
+                       (*args, *dbm.OUTDATED_PART_NOTES)).fetchone()[0]
+
+
 def run_index(con, folders: list[str], engine_name: str = "apple", confirm_missing: bool = False,
               limit: int | None = None, log: Callable[[str], None] = print, engine=None, workers: int = 1,
               retry: bool = False):
@@ -1271,6 +1289,12 @@ def run_index(con, folders: list[str], engine_name: str = "apple", confirm_missi
         for e in s.dir_errors[:10]:
             log(f"   nicht lesbar: {e}")
     scope = ids if folders else None
+    dbm.mark_outdated_mails(con)          # z. B. Mails, die ein älterer Lauf noch mit Format 10 geschrieben hat
+    con.commit()
+    outdated = _count_outdated(con, scope)
+    if outdated:
+        log(f"{outdated} E-Mail(s) mit winmail.dat werden neu gelesen – die Anhänge darin werden jetzt ausgewertet "
+            "(schon erkannte Seiten werden übernommen).")
     retried = retry_errors(con, root_ids=scope) if retry else 0
     if retried:
         log(f"{retried} Datei(en) mit Fehler werden erneut versucht.")

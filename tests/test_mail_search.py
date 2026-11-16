@@ -154,17 +154,21 @@ def test_report_counts_mails_word_and_attachments(tmp_path, capsys):
         ("Kopie.pdf", data, "application/pdf"),                                         # übernommen
         ("Neu.pdf", pdf(tmp_path, [["Angebot Dachrinne 410,00"]], "n.pdf"), "application/pdf"),   # ausgewertet
         ("Rechnung.pdf.txt", PLACEHOLDER.format("Rechnung.pdf").encode(), "application/octet-stream"),
-        ("winmail.dat", b"\x78\x9f\x3e\x22" + bytes(100), "application/ms-tnef")])          # nicht ausgewertet
+        ("winmail.dat", b"\x78\x9f\x3e\x22" + bytes(100), "application/ms-tnef")])          # nicht lesbar
     (root / "Brief.docx").write_bytes(docx_bytes(["Mietbescheinigung"]))
     (root / "Liste.xlsx").write_bytes(b"PK\x03\x04 kein excel")
     db, con = index(tmp_path, root)
     r = build_report(con)
     assert r["mails"] == 1 and r["words"] == 1 and r["unsupported"] == {".xlsx": 1}
-    assert r["attachments"] == {"n": 4, "evaluated": 1, "reused": 1, "links": 1, "duplicates": 0, "skipped": 1}
+    # die (kaputte) winmail.dat zählt getrennt
+    assert r["attachments"] == {"n": 3, "evaluated": 1, "reused": 1, "links": 1, "duplicates": 0, "skipped": 0,
+                                "in_tnef": 0, "tnef": {"n": 1, "read": 0, "not_read": {"nicht lesbar": 1}}}
     text = format_report(r)
     assert "E-Mails: 1, Word: 1" in text
     assert ("Mail-Anhänge: 1 ausgewertet, 1 übernommen (gleicher Inhalt), 1 Platzhalter (in DOMUS abgelegt), "
-            "1 nicht ausgewertet") in text
+            "0 nicht ausgewertet") in text
+    assert "winmail.dat (Outlook): 0 geöffnet, darin 0 Anhänge (oben mitgezählt); 1 nicht ausgewertet " \
+           "(nicht lesbar 1)" in text
     assert "nicht unterstützt:       1  (.xlsx 1)" in text
     assert not [p for p in r["problems"] if p["pfad"].endswith((".eml", ".docx"))]   # keine Flut in der Problemliste
     con.close()

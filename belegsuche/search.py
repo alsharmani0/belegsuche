@@ -114,6 +114,7 @@ class Hit:
     part_no: int | None = None
     part_name: str | None = None
     part_kind: str | None = None      # body | pdf | image | word | text | mail
+    part_from: str | None = None      # Anhang in einer winmail.dat (bzw. eingebetteten Nachricht): deren Name
     part_page: int | None = None      # Seite innerhalb des Teils (ab 1); page_no bleibt die Seite der ganzen Mail
     part_pages: int | None = None
     mail_subject: str | None = None
@@ -872,18 +873,18 @@ class Searcher:
 
     @staticmethod
     def _mail_parts(con, fids: list[int]) -> dict[int, list[tuple]]:
-        """Teile der E-Mails unter den Kandidaten: file_id -> [(first_page, last_page, part_no, name, kind, sha)],
-        nach Seiten sortiert. Leer bei einem Index ohne Tabelle parts (vor Format 10)."""
+        """Teile der E-Mails unter den Kandidaten: file_id -> [(first_page, last_page, part_no, name, kind, sha,
+        mime_path)], nach Seiten sortiert. Leer bei einem Index ohne Tabelle parts (vor Format 10)."""
         out: dict[int, list[tuple]] = defaultdict(list)
         if not fids or not dbm.has_table(con, "parts"):
             return out
         for chunk in range(0, len(fids), 900):
             ids_ = fids[chunk:chunk + 900]
             for r in con.execute(
-                    "SELECT file_id, first_page, n_pages, part_no, name, kind, sha256 FROM parts"
+                    "SELECT file_id, first_page, n_pages, part_no, name, kind, sha256, mime_path FROM parts"
                     f" WHERE n_pages > 0 AND first_page IS NOT NULL AND file_id IN ({','.join('?' * len(ids_))})"
                     " ORDER BY file_id, first_page", ids_):
-                out[r[0]].append((r[1], r[1] + r[2] - 1, r[3], r[4], r[5], r[6]))
+                out[r[0]].append((r[1], r[1] + r[2] - 1, r[3], r[4], r[5], r[6], r[7]))
         return out
 
     @staticmethod
@@ -1169,10 +1170,20 @@ class Searcher:
         return SearchResponse(query, hits, unknown, len(cands), (time.time() - t0) * 1000)
 
     @staticmethod
+    def _container_name(con, file_id: int, mime_path: str | None) -> str | None:
+        """Anhang in einer winmail.dat („2!3“): Name der winmail.dat (bzw. der eingebetteten Nachricht), sonst None."""
+        if not mime_path or "!" not in mime_path.rsplit("/", 1)[-1]:
+            return None
+        outer = mime_path[:mime_path.rfind("!")]
+        row = con.execute("SELECT name FROM parts WHERE file_id = ? AND mime_path = ?", (file_id, outer)).fetchone()
+        return (row[0] if row else None) or "winmail.dat"
+
+    @staticmethod
     def _add_mail_fields(con, hit: Hit, part: tuple | None, m) -> None:
         if part is not None:
-            first, last, hit.part_no, hit.part_name, hit.part_kind, _ = part
+            first, last, hit.part_no, hit.part_name, hit.part_kind, _, mime_path = part
             hit.part_page, hit.part_pages = hit.page_no - first + 1, last - first + 1
+            hit.part_from = Searcher._container_name(con, hit.file_id, mime_path)
         if dbm.has_table(con, "mails"):
             row = con.execute("SELECT subject, sender, sent_at FROM mails WHERE file_id = ?", (hit.file_id,)).fetchone()
             if row:
