@@ -3,6 +3,24 @@
 Bedienung und Messbefehle stehen in der [README](../README.md). Die früheren Messwerte sind unten
 getrennt aufgeführt: Die beiden alten Fragenlisten sind kein Blindtest für den aktuellen Code.
 
+## E-Mail und Word (16.11.2026)
+
+- **Lesen:** `.eml` mit Kopf, Mailtext (HTML über `html.parser`, kein Netzzugriff) und Anhängen; Word über
+  `zipfile` (docx/dotx/dotm) bzw. `textutil -stdin -stdout` (doc/dot/rtf/odt) mit eigenem Zeitlimit von 60 s.
+  Anhänge werden an den ersten Bytes erkannt (PDF, PNG, JPEG, GIF, TIFF, HEIC, ZIP/docx, OLE/doc, RTF).
+  PDF-Anhänge und Bilder werden im Speicher gelesen (Vision über `NSData`, auch HEIC), ohne Datei neben dem Original.
+- **Seitenmodell:** `pages` bleibt fortlaufend (Seite 1 = Mailkopf + Mailtext, danach die Anhänge). Neue Tabellen
+  `parts` (Teil, Seitenbereich, Art, Name, sha256, Lage im MIME-Baum, Hinweis) und `mails` (Kopf).
+- **Sparen:** Der Hauptprozess bestimmt vor dem Einlesen die sha256 der Anhänge und gibt schon bekannte Seiten an
+  den Arbeitsprozess. Mails werden nach den übrigen Dateien eines Laufs gelesen, damit Anhänge, die auch als
+  Datei im Vorgangsordner liegen, übernommen werden. Umgekehrt übernimmt eine Datei die Seiten eines gleichen
+  Anhangs.
+- **Rückfall:** Nach Zeitlimit oder beim letzten Versuch nach Abstürzen wird eine Mail nur mit Mailtext gelesen
+  (Hinweis am Eintrag), statt als Fehler zu enden.
+- **Suche:** Treffer in Mails nennen Teil, Seite im Teil, Betreff, Absender und Datum. Seiten verschiedener Anhänge
+  stärken sich nicht gegenseitig. Derselbe Inhalt als eigene Datei und als Mail-Anhang ist ein Treffer
+  („auch unter: …eml (Anhang 1)“).
+
 ## Projektprüfung vom 11.11.2026
 
 - **Einlesen:** Ein vorübergehend nicht lesbarer Dateieintrag gilt nicht als gelöscht. Ein während der
@@ -48,13 +66,21 @@ Ein privater Suchindex wurde für diese Projektprüfung nicht geöffnet oder mig
 
 ## Indexformat
 
-Indexformat 9 trennt explizite Hausnummernlisten von Zahlenbereichen. Ältere Suchindizes werden aus ihren
+Indexformat 10 ergänzt die Tabellen `parts` und `mails` und schreibt bei E-Mails Betreff, Absender, Empfänger,
+Datum und den Anhangnamen in die Pfadspalte des Suchindex. Ein Index im Format 9 wird ohne Neuaufbau umgestellt
+(nur das Format wird vermerkt; vorhandene Suchzeilen ändern sich nicht). Noch ältere Suchindizes werden aus ihren
 gespeicherten Seitentexten neu aufgebaut – auch bei bereits indizierten Dateien, die auf das erneute
-Einlesen warten. Bestehende OCR-Ergebnisse werden bei dieser Migration nicht ersetzt.
+Einlesen warten. Bestehende OCR-Ergebnisse werden bei dieser Migration nicht ersetzt. Ältere Programmversionen
+lehnen einen Index im Format 10 ab.
 
 ## Bekannte Grenzen
 
-- Word, Excel, E-Mails (.msg/.eml) und ZIP werden nicht gelesen; der Bericht zählt sie als „nicht unterstützt“.
+- Excel, ZIP und Outlook-`.msg` werden nicht gelesen; der Bericht zählt sie als „nicht unterstützt“. In Mails
+  bleiben `winmail.dat` (Outlook/TNEF), Excel-, ZIP- und Video-Anhänge, Anhänge über 50 MB und
+  passwortgeschützte PDFs unausgewertet (Hinweis am Anhang). Verschlüsselte Mails (S/MIME): nur der Kopf.
+- Bilder in Word-Dateien werden nicht per Texterkennung gelesen (eingescannte Belege in Word bleiben ohne Text,
+  mit Hinweis). Seiten einer Word-Datei gibt es nur an harten Seitenumbrüchen; sonst ist sie eine Seite.
+- Zitierte Vorgänger-Mails bleiben im Mailtext und werden mit durchsucht.
 - Keine Suche nach Bedeutung, nur Synonyme, Wortteile und Tippfehler.
 - Ein Umlautfehler zusammen mit einem Buchstabendreher im selben Wort wird nicht gefunden.
 - Handschrift wird nur teilweise erkannt, auch mit Tesseract.

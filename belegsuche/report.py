@@ -76,6 +76,36 @@ def _pages_list(nums: list[int]) -> str:
     return ", ".join(str(n) for n in nums)
 
 
+def _part_labels(con, file_id: int):
+    """Seitennummer einer E-Mail -> „Anhang 2 Seite 1“ (Mailtext: „Mailtext“)."""
+    rows = con.execute("SELECT part_no, first_page, n_pages FROM parts WHERE file_id = ? AND n_pages > 0"
+                       " AND first_page IS NOT NULL", (file_id,)).fetchall() if dbm.has_table(con, "parts") else []
+
+    def label(page_no: int) -> str:
+        for part_no, first, n in rows:
+            if first <= page_no < first + n:
+                return "Mailtext" if part_no == 0 else f"Anhang {part_no} Seite {page_no - first + 1}"
+        return f"Seite {page_no}"
+    return label
+
+
+def _attachment_stats(con) -> dict | None:
+    """Mail-Anhänge fertig eingelesener Mails: ausgewertet, übernommen (gleicher Inhalt schon eingelesen),
+    DOMUS-Platzhalter und nicht ausgewertet (Logos zählen nicht, winmail.dat, Excel, zu groß …)."""
+    if not dbm.has_table(con, "parts"):
+        return None
+    from .mail import REUSED_NOTE
+    row = con.execute(
+        "SELECT count(*) AS n,"
+        " coalesce(sum(t.n_pages > 0 AND coalesce(t.note, '') != ?), 0) AS evaluated,"
+        " coalesce(sum(t.n_pages > 0 AND t.note = ?), 0) AS reused,"
+        " coalesce(sum(t.kind = 'link'), 0) AS links,"
+        " coalesce(sum(t.kind != 'link' AND t.n_pages = 0), 0) AS skipped"
+        " FROM parts t JOIN files f ON f.id = t.file_id WHERE t.part_no > 0 AND f.status = 'done'",
+        (REUSED_NOTE, REUSED_NOTE)).fetchone()
+    return {k: row[k] for k in ("n", "evaluated", "reused", "links", "skipped")}
+
+
 def build_report(con) -> dict:
     r: dict = {"roots": [], "status": {}, "unsupported": {}, "problems": []}
     for row in con.execute("SELECT id, path FROM roots ORDER BY id"):
@@ -108,15 +138,25 @@ def build_report(con) -> dict:
     r["duplicates"] = q("SELECT coalesce(sum(n - 1), 0) FROM (SELECT count(*) AS n FROM files"
                         " WHERE status = 'done' AND sha256 IS NOT NULL GROUP BY sha256 HAVING n > 1)")
     r["broken_names"], r["broken_name_list"] = _broken_names(con)
+    kinds = dict(con.execute("SELECT kind, count(*) FROM files WHERE status = 'done' GROUP BY kind").fetchall())
+    r["mails"], r["words"] = kinds.get("mail", 0), kinds.get("word", 0)
+    r["attachments"] = _attachment_stats(con)
 
     # Auffällige Scan-Seiten je Datei: leer (vermutlich Rückseite) oder unsicher erkannt
     blank: dict[int, list[int]] = {}
     low: dict[int, list[tuple[int, float]]] = {}
+    mail_files: set[int] = set()
     for row in con.execute(
-            "SELECT p.file_id, p.page_no, p.ocr_conf, length(trim(p.text, ?)) AS n FROM pages p"
+            "SELECT p.file_id, p.page_no, p.ocr_conf, length(trim(p.text, ?)) AS n, f.kind FROM pages p"
             " JOIN files f ON f.id = p.file_id WHERE f.status = 'done' AND f.text_chars > 0 AND p.source != 'text'"
             " AND (length(trim(p.text, ?)) < ? OR (p.ocr_conf IS NOT NULL AND p.ocr_conf < ?))"
             " ORDER BY p.file_id, p.page_no", (_WHITESPACE, _WHITESPACE, BLANK_CHARS, LOW_CONF)):
+        if row["kind"] == "mail":
+            # Fotos und Bilder im Anhang ohne Text sind normal (keine „Rückseite“); unsichere Seiten mit Anhang
+            mail_files.add(row["file_id"])
+            if row["n"] >= BLANK_CHARS:
+                low.setdefault(row["file_id"], []).append((row["page_no"], row["ocr_conf"]))
+            continue
         if row["n"] < BLANK_CHARS:
             blank.setdefault(row["file_id"], []).append(row["page_no"])
         else:
@@ -151,7 +191,8 @@ def build_report(con) -> dict:
             if row["text_chars"] == 0:
                 parts.append("kein Text erkannt")
             if fid in low:
-                parts.append("unsichere Texterkennung: " + ", ".join(f"Seite {n} ({c:.0%})" for n, c in low[fid]))
+                label = _part_labels(con, fid) if fid in mail_files else (lambda n: f"Seite {n}")
+                parts.append("unsichere Texterkennung: " + ", ".join(f"{label(n)} ({c:.0%})" for n, c in low[fid]))
             if fid in blank:
                 parts.append(f"leere Seite {_pages_list(blank[fid])} – vermutlich Rückseite, bitte kurz prüfen")
             reason = "; ".join(parts)
@@ -175,6 +216,7 @@ def format_report(r: dict, max_problems: int = 25) -> str:
         f"  mit erkanntem Text:      {r['searchable_with_text']}"
         f"  (davon mit Texterkennung: {r['searchable_with_ocr_text']})",
         f"  nur Dateiname/Pfad:      {r['searchable_name_only']}",
+        *([f"  E-Mails: {r['mails']}, Word: {r['words']}"] if r.get("mails") or r.get("words") else []),
         f"  ohne erkennbaren Text:   {r['done_no_text']}",
         f"  Fehler:                  {st.get('error', 0)}",
         f"  nicht unterstützt:       {st.get('skipped', 0)}"
@@ -186,6 +228,10 @@ def format_report(r: dict, max_problems: int = 25) -> str:
         f"Seiten: {r['pages']} (per Texterkennung: {r['ocr_pages']}, davon unsicher: {r['low_conf_pages']}, "
         f"leer: {r['blank_pages']})",
     ]
+    att = r.get("attachments")
+    if att and att["n"]:
+        lines += ["", f"Mail-Anhänge: {att['evaluated']} ausgewertet, {att['reused']} übernommen (gleicher Inhalt), "
+                      f"{att['links']} Platzhalter (in DOMUS abgelegt), {att['skipped']} nicht ausgewertet"]
     if r.get("broken_names"):
         names = r["broken_name_list"]
         lines += ["", f"Dateinamen mit beschädigten Umlauten: {r['broken_names']}  (beim Kopieren falsch übertragen? "

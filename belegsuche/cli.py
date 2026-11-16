@@ -136,6 +136,7 @@ def cmd_index(args) -> int:
                 # soll aber nicht nach jedem unveränderten Lauf denselben Hinweis auslösen.
                 retryable = con.execute(
                     "SELECT count(*) FROM files WHERE status='error' AND coalesce(error,'') NOT LIKE 'PDF beschädigt%'"
+                    " AND coalesce(error,'') NOT LIKE 'Word-Datei beschädigt%'"
                     f" AND coalesce(error,'') NOT IN ({','.join('?' for _ in PERMANENT_ERRORS)})",
                     PERMANENT_ERRORS).fetchone()[0]
         except KeyboardInterrupt:
@@ -170,12 +171,18 @@ def cmd_search(args) -> int:
         print("Nichts gefunden.")
         return 1
     for i, h in enumerate(resp.hits, 1):
-        page = f"  (Seite {h.page_no}/{h.pages})" if h.pages > 1 else ""
+        page = f"  (Seite {h.page_no}/{h.pages})" if h.pages > 1 and h.kind != "mail" else ""
         off = "" if h.available else "  [nicht verbunden]"
         if h.outdated:
             off += "  [geändert – wird neu eingelesen]"
         print(f"{i:>2}. {_safe(h.filename)}{page}{off}")
         print(f"    {_safe(os.path.join(h.root, h.folder))}")
+        if h.kind == "mail":
+            head = " · ".join(x for x in (h.mail_subject or "(ohne Betreff)", h.mail_from, h.mail_date) if x)
+            print(f"    Mail: {_safe(head)}")
+            if h.part_no:
+                print(f"    Anhang {h.part_no}: {_safe(h.part_name or '(ohne Namen)')}, "
+                      f"Seite {h.part_page}/{h.part_pages}")
         print(f"    {_safe(h.snippet_text)}")
         if h.missing:
             print(f"    nicht enthalten: {_safe(', '.join(h.missing))}")

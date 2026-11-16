@@ -12,7 +12,11 @@ Ablauf
 4. Bewertung pro Datei: Wie viele Teile der Anfrage kommen vor (auf der besten Seite voll,
    auf anderen Seiten desselben Dokuments leicht abgewertet), wie genau, und wie selten ist
    der Teil im Bestand (seltene Begriffe und Nummern zählen mehr).
-5. Inhaltsgleiche Dateien werden zusammengefasst; eine erreichbare Kopie hat Vorrang.
+5. Inhaltsgleiche Dateien werden zusammengefasst; eine erreichbare Kopie hat Vorrang. Ein Mail-Anhang mit
+   demselben Inhalt wie eine eigenständige Datei zählt dazu („auch unter: …eml (Anhang 2)“).
+
+E-Mails: Seite 1 ist Mailkopf + Mailtext, danach folgen die Seiten der Anhänge (Tabelle parts). Ein Treffer
+nennt den Anhang und die Seite darin; die Seiten verschiedener Anhänge stärken sich nicht gegenseitig.
 """
 from __future__ import annotations
 
@@ -104,6 +108,16 @@ class Hit:
     available: bool
     duplicates: list[str] = field(default_factory=list)
     outdated: bool = False     # Datei wurde geändert, Text stammt noch vom letzten Einlesen
+    kind: str | None = None    # pdf | image | word | mail
+    # nur E-Mails: Teil, in dem die angezeigte Seite liegt (0 = Mailkopf und Mailtext, ab 1 die Anhänge)
+    part_no: int | None = None
+    part_name: str | None = None
+    part_kind: str | None = None      # body | pdf | image | word | text | mail
+    part_page: int | None = None      # Seite innerhalb des Teils (ab 1); page_no bleibt die Seite der ganzen Mail
+    part_pages: int | None = None
+    mail_subject: str | None = None
+    mail_from: str | None = None
+    mail_date: str | None = None      # „12.03.2021 14:05“
 
     @property
     def fullpath(self) -> str:
@@ -852,6 +866,27 @@ class Searcher:
         finally:
             con.close()
 
+    @staticmethod
+    def _mail_parts(con, fids: list[int]) -> dict[int, list[tuple]]:
+        """Teile der E-Mails unter den Kandidaten: file_id -> [(first_page, last_page, part_no, name, kind, sha)],
+        nach Seiten sortiert. Leer bei einem Index ohne Tabelle parts (vor Format 10)."""
+        out: dict[int, list[tuple]] = defaultdict(list)
+        if not fids or not dbm.has_table(con, "parts"):
+            return out
+        for chunk in range(0, len(fids), 900):
+            ids_ = fids[chunk:chunk + 900]
+            for r in con.execute(
+                    "SELECT file_id, first_page, n_pages, part_no, name, kind, sha256 FROM parts"
+                    f" WHERE n_pages > 0 AND first_page IS NOT NULL AND file_id IN ({','.join('?' * len(ids_))})"
+                    " ORDER BY file_id, first_page", ids_):
+                out[r[0]].append((r[1], r[1] + r[2] - 1, r[3], r[4], r[5], r[6]))
+        return out
+
+    @staticmethod
+    def _part_at(parts: list[tuple], page_no: int) -> tuple | None:
+        i = bisect.bisect_right([p[0] for p in parts], page_no) - 1
+        return parts[i] if i >= 0 and parts[i][0] <= page_no <= parts[i][1] else None
+
     def _has_doc_index(self, con) -> bool:
         if not hasattr(self, "_doc_index"):
             self._doc_index = con.execute("SELECT 1 FROM sqlite_master WHERE name = 'fts_doc'").fetchone() is not None
@@ -950,7 +985,7 @@ class Searcher:
             ids_ = pids[chunk:chunk + 900]
             for r in con.execute(
                     "SELECT p.id AS pid, p.page_no, p.file_id, f.relpath, f.sha256, f.pages, f.ocr_pages, f.mtime,"
-                    " f.status, r.path AS root FROM pages p JOIN files f ON f.id = p.file_id"
+                    " f.status, f.kind, r.path AS root FROM pages p JOIN files f ON f.id = p.file_id"
                     " JOIN roots r ON r.id = f.root_id"
                     # geänderte Dateien warten auf das Neu-Einlesen: bis dahin mit dem bisherigen Text finden
                     f" WHERE f.status IN {dbm.SEARCHABLE_SQL} AND p.id IN ({','.join('?' * len(ids_))})", ids_):
@@ -959,6 +994,7 @@ class Searcher:
         for rid in pages:
             if rid in meta:
                 by_file[meta[rid]["file_id"]].append(rid)
+        mail_parts = self._mail_parts(con, [fid for fid, rids in by_file.items() if meta[rids[0]]["kind"] == "mail"])
 
         # 3. Pro Datei: beste Seite samt ihren Nachbarseiten (±PAGE_WINDOW) – ein Beleg in einem
         #    Sammel-PDF umfasst ein paar Seiten, nicht das ganze PDF
@@ -969,11 +1005,16 @@ class Searcher:
             positions = {r: i for i, r in enumerate(srt)}
             # Seite beginnt einen neuen Beleg ("Seite 1 von 3"): Nachbarseiten davor gehören nicht dazu
             starts = {r for r in srt if any(m in pages[r][2] for m in DOC_START_MARKERS)}
+            # E-Mail: jeder Anhang (und der Mailtext) ist ein eigenes Dokument – Nachbarseiten nur im selben Teil
+            fparts = mail_parts.get(fid)
+            part_of = ({r: (p[2] if (p := self._part_at(fparts, meta[r]["page_no"])) else -1) for r in srt}
+                       if fparts else None)
             cands_p = []                     # (Fensterwert, eigener Wert, -Seite, rowid, Gewichte)
             for i, r in enumerate(srt):
                 pn = meta[r]["page_no"]
                 near = [q for q in srt[max(0, i - PAGE_WINDOW):i] + srt[i + 1:i + 1 + PAGE_WINDOW]
                         if abs(meta[q]["page_no"] - pn) <= PAGE_WINDOW
+                        and (part_of is None or part_of[q] == part_of[r])
                         and not any(x in starts for x in srt[min(i, positions[q]) + 1:max(i, positions[q]) + 1])]
                 own = pages[r][0]
                 W = [max(own[k], OTHER_PAGE_FACTOR * max((pages[q][0][k] for q in near), default=0.0))
@@ -986,11 +1027,21 @@ class Searcher:
             files.append([top_w / total_imp, fid, best, best_W])
         files.sort(key=lambda x: -x[0])
 
-        # 4. Inhaltsgleiche Dateien zusammenfassen – vor dem Kürzen, sonst verdrängen viele Kopien andere Belege
+        # 4. Inhaltsgleiche Dateien zusammenfassen – vor dem Kürzen, sonst verdrängen viele Kopien andere Belege.
+        #    Liegt die beste Seite einer Mail in einem Anhang (PDF, Bild, Word), zählt dessen Inhalt: dieselbe
+        #    Rechnung als eigene Datei und als Mail-Anhang ist ein Treffer.
         groups_by_sha: dict[str, list] = {}
         order: list[list] = []
+
+        def best_part(f) -> tuple | None:
+            fparts = mail_parts.get(f[1])
+            return self._part_at(fparts, meta[f[2]]["page_no"]) if fparts else None
+
         for f in files:
             sha = meta[f[2]]["sha256"] or f"file{f[1]}"
+            bp = best_part(f)
+            if bp is not None and bp[5] and bp[4] in ("pdf", "image", "word"):
+                sha = bp[5]
             if sha in groups_by_sha:
                 groups_by_sha[sha].append(f)
             else:
@@ -1027,21 +1078,43 @@ class Searcher:
                 root_online[m["root"]] = os.path.isdir(m["root"])
             return root_online[m["root"]] and os.path.exists(os.path.join(m["root"], m["relpath"]))
 
+        def where(f) -> str:
+            m = meta[f[2]]
+            path = os.path.join(m["root"], m["relpath"])
+            bp = best_part(f)
+            return f"{path} (Anhang {bp[2]})" if bp is not None and bp[2] > 0 else path
+
         hits: list[Hit] = []
         for grp in order[:limit]:
-            # eine seit dem Einlesen geänderte Kopie (Text veraltet) nur, wenn keine aktuelle erreichbar ist
-            main = next((f for f in grp if meta[f[2]]["status"] == "done" and available(meta[f[2]])), None) \
-                or next((f for f in grp if available(meta[f[2]])), grp[0])
+            # eine seit dem Einlesen geänderte Kopie (Text veraltet) nur, wenn keine aktuelle erreichbar ist;
+            # eine eigenständige Datei vor demselben Inhalt als Mail-Anhang (lässt sich direkt öffnen) – aber nur,
+            # wenn sie genauso gut passt (der Absender einer Mail steht nicht in der Rechnung selbst)
+            ok = [f for f in grp if meta[f[2]]["status"] == "done" and available(meta[f[2]])]
+            main = next((f for f in ok if best_part(f) is None and f[0] >= ok[0][0] - 1e-9), None) \
+                or next(iter(ok), None) or next((f for f in grp if available(meta[f[2]])), grp[0])
             score, fid, rid, W = main
             m = meta[rid]
             text = con.execute("SELECT text FROM pages WHERE id = ?", (rid,)).fetchone()[0]
             snip_h, snip_t = make_snippet(text, set(t for ts in pages[rid][1] for t in ts))
             folder, filename = os.path.split(m["relpath"])
-            hits.append(Hit(
+            hit = Hit(
                 file_id=fid, relpath=m["relpath"], root=m["root"], filename=filename, folder=folder,
                 page_no=m["page_no"], pages=m["pages"] or 1, score=round(score, 4), snippet_html=snip_h,
                 snippet_text=snip_t, matched=[g.label for g, w in zip(live, W) if w > 0],
                 missing=[g.label for g, w in zip(live, W) if w == 0], ocr=bool(m["ocr_pages"]),
                 available=available(m), outdated=m["status"] != "done",
-                duplicates=[os.path.join(meta[f[2]]["root"], meta[f[2]]["relpath"]) for f in grp if f is not main]))
+                duplicates=[where(f) for f in grp if f is not main], kind=m["kind"])
+            if m["kind"] == "mail":
+                self._add_mail_fields(con, hit, best_part(main))
+            hits.append(hit)
         return SearchResponse(query, hits, unknown, len(cands), (time.time() - t0) * 1000)
+
+    @staticmethod
+    def _add_mail_fields(con, hit: Hit, part: tuple | None) -> None:
+        if part is not None:
+            first, last, hit.part_no, hit.part_name, hit.part_kind, _ = part
+            hit.part_page, hit.part_pages = hit.page_no - first + 1, last - first + 1
+        if dbm.has_table(con, "mails"):
+            row = con.execute("SELECT subject, sender, sent_at FROM mails WHERE file_id = ?", (hit.file_id,)).fetchone()
+            if row:
+                hit.mail_subject, hit.mail_from, hit.mail_date = row[0], row[1], dbm.german_date(row[2]) or None

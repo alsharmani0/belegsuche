@@ -1,8 +1,9 @@
 # Belegsuche
 
-Belegsuche findet Rechnungen, Belege und Scans auf deinem Mac. Suche zum Beispiel nach Firma,
-Betrag oder Rechnungsnummer – auch wenn die Datei nur `Scan_00487.pdf` heißt. Die Trefferliste
-zeigt die Fundstelle und die Seite; von dort öffnest du den Beleg oder zeigst ihn im Finder an.
+Belegsuche findet Rechnungen, Belege und Scans auf deinem Mac – auch in E-Mails (.eml) samt Anhängen und in
+Word-Dateien. Suche zum Beispiel nach Firma, Betrag oder Rechnungsnummer – auch wenn die Datei nur
+`Scan_00487.pdf` heißt. Die Trefferliste zeigt die Fundstelle und die Seite; von dort öffnest du den Beleg oder
+zeigst ihn im Finder an.
 
 [Schnellstart](#installation) · [Aktualisieren](#aktualisieren) · [Messwerte und bekannte Grenzen](docs/STAND.md)
 
@@ -24,6 +25,8 @@ Mit ⌘ K springt man ins Suchfeld, mit Esc zurück zur Ordnerübersicht.*
   `Müller` = `Mueller` · `Musterstraße` = `Musterstr.` · `Heizung` findet `Heizungswartung` ·
   `Hausmeister` findet `Hauswart` · Tippfehler wie `Schornsteinfger` werden toleriert.
 - **Treffer** mit Dateiname, Ordner, Seite und markiertem Textausschnitt; Öffnen oder im Finder zeigen per Klick.
+- **E-Mails mit Anhängen**: Ein Treffer in einer Mail nennt Betreff, Absender und Datum und, falls die Fundstelle
+  in einem Anhang liegt, den Anhang und die Seite darin („Anhang 2: Rechnung.pdf, Seite 3/5“).
 
 ## Installation
 
@@ -199,8 +202,31 @@ dort nur die eingebauten.
 
 ## Unterstützte Dateien
 
-PDF (mit Textebene oder gescannt), JPG, PNG, TIFF (mehrseitig), HEIC, BMP, GIF, WebP.
-Andere Dateien (Word, Excel, E-Mails, ZIP) werden im Bericht als „nicht unterstützt“ gezählt.
+- PDF (mit Textebene oder gescannt), JPG, PNG, TIFF (mehrseitig), HEIC, BMP, GIF, WebP.
+- **Word**: `.docx`, `.dotx`, `.dotm` (direkt gelesen, mit Kopf- und Fußzeilen), `.doc`, `.dot`, `.rtf`, `.odt`
+  (über das macOS-Programm `textutil`, das die Datei nur über die Standardeingabe bekommt). Bilder in Word-Dateien
+  werden nicht per Texterkennung gelesen; hat eine Datei fast keinen Text, steht ein Hinweis im Bericht.
+- **E-Mails** (`.eml`): Seite 1 enthält Betreff, Von, An, Cc, Datum und den Mailtext (HTML-Mails als Text, ohne
+  Nachladen von Bildern). Danach folgen die Seiten der Anhänge: PDF, Bilder (mit Texterkennung), Word, Text und
+  angehängte Mails (bis Tiefe 2). Die Art eines Anhangs wird am Inhalt erkannt, nicht am Namen. Betreff und
+  Absender zählen bei allen Seiten einer Mail mit, so findet „Absender + Betrag“ auch den Betrag im Anhang.
+  - Kleine Bilder im Mailtext (Signatur-Logos), gleiche Bilder in derselben Mail und Signaturen (`smime.p7s`)
+    werden übersprungen. Ein Anhang mit demselben Inhalt wie eine schon eingelesene Datei oder ein Anhang einer
+    anderen Mail übernimmt deren Text – ohne neue Texterkennung.
+  - DOMUS-Platzhalter („Die Datei '…' wurde in die Dokumentenverwaltung von DOMUS … verschoben“) werden als
+    Verweis auf die gleichnamige Datei im Vorgangsordner (Ordner über `Emails/`) gespeichert; der Dateiname steht
+    im Mailtext („Anhang in DOMUS abgelegt: …“).
+  - Nicht ausgewertet (Hinweis am Anhang, kein Fehler der Mail): `winmail.dat`, Excel, ZIP, Videos, Anhänge über
+    50 MB, passwortgeschützte PDFs. Höchstens 60 Anhänge und 1000 Seiten je Mail.
+  - Hängt die Texterkennung eines Anhangs oder stürzt sie wiederholt ab, wird die Mail nur mit Mailtext (ohne
+    PDF- und Bild-Anhänge) eingelesen und im Bericht markiert.
+- Outlook-`.msg`, Excel und ZIP werden im Bericht als „nicht unterstützt“ gezählt. Der Bericht nennt außerdem
+  die Zahl der eingelesenen E-Mails und Word-Dateien und wie viele Mail-Anhänge ausgewertet, übernommen,
+  als Platzhalter erkannt oder nicht ausgewertet wurden.
+
+Ein vorhandener Index wird beim ersten Start auf das neue Format umgestellt, ohne neue Texterkennung und ohne
+Neuaufbau des Suchindex. E-Mails und Word-Dateien, die frühere Versionen als „nicht unterstützt“ eingetragen haben,
+liest der nächste `belegsuche index` ein.
 
 ## Entwicklung
 
