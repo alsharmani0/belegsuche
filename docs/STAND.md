@@ -20,12 +20,23 @@ getrennt aufgeführt: Die beiden alten Fragenlisten sind kein Blindtest für den
 - **Suche:** Treffer in Mails nennen Teil, Seite im Teil, Betreff, Absender und Datum. Seiten verschiedener Anhänge
   stärken sich nicht gegenseitig. Derselbe Inhalt als eigene Datei und als Mail-Anhang ist ein Treffer
   („auch unter: …eml (Anhang 1)“).
+- **Öffnen:** „Mail öffnen“ startet `open -b com.apple.mail <eml>` (sonst das Standardprogramm), „Im Finder
+  zeigen“ zeigt die `.eml`. „Anhang öffnen“ liest die Mail nur lesend neu, findet den Teil über `parts.mime_path`,
+  prüft die sha256 (Abweichung: 409 „Mail geändert – neu einlesen“) und schreibt ihn in ein eigenes
+  `mkdtemp(prefix="belegsuche-anhang-")` unter `$TMPDIR` (0700, Datei 0400, `O_EXCL|O_NOFOLLOW`). Liegt der
+  Temp-Ordner in einem eingelesenen Ordner, wird nichts geschrieben. Dateiname: nur Basisname, ohne Steuer- und
+  Richtungszeichen, ohne führende Punkte, gekürzt, Endung aus den ersten Bytes (HTML-Anhänge werden `.txt`).
+  Geöffnet werden nur PDF, Bilder, doc/docx/rtf/odt und Text. `/datei/<id>/teil/<n>` liefert PDF und Bilder aus
+  dem Speicher (für `#page=`); Mails, Word und alle übrigen Typen gehen nur als Download mit CSP `sandbox` hinaus.
 
-**Verifiziert:** 648 Tests grün (lokal, Python 3.12.14, macOS, mit Apples Texterkennung), davon 61 neue mit
-erfundenen Mails und Word-Dateien. Lesetest auf einem echten Bestand, nur lesend und ohne Texterkennung: eine
-Stichprobe von 10.000 Mails und 400 Word-Dateien ohne Fehler, Mail im Median 4 ms, docx 2 ms, doc 49 ms.
-Inhalt und Änderungszeit der gelesenen Dateien blieben unverändert. Öffnen von Mails und Anhängen in der
-Oberfläche ist nicht Teil dieses Schritts.
+**Verifiziert:** 717 Tests grün (lokal, Python 3.12.14, macOS, mit Apples Texterkennung), davon 130 neue mit
+erfundenen Mails und Word-Dateien (69 zum Öffnen). Lesetest auf einem echten Bestand, nur lesend und ohne
+Texterkennung: eine Stichprobe von 10.000 Mails und 400 Word-Dateien ohne Fehler, Mail im Median 4 ms, docx
+2 ms, doc 49 ms.
+Inhalt und Änderungszeit der gelesenen Dateien blieben unverändert. Das Öffnen ist mit erfundenen Mails
+geprüft (`tests/test_mail_open.py`: Befehle, Temp-Kopie außerhalb der Ordner, Namensbereinigung, sha-Abweichung,
+abgelehnte Typen, Download statt Anzeige, fremde Seiten, Aufräumen, XSS über Betreff und Anhangname); die
+Oberfläche wurde im Browser hell, dunkel und in Handybreite angesehen.
 
 ## Projektprüfung vom 11.11.2026
 
@@ -92,6 +103,9 @@ lehnen einen Index im Format 10 ab.
 - Handschrift wird nur teilweise erkannt, auch mit Tesseract.
 - Echte Mehrdeutigkeit: Jahresabrechnungen nennen dieselben Begriffe wörtlich, während der gesuchte Beleg andere
   Wörter benutzt. Sie stehen dann vor dem gesuchten Beleg.
+- „Mail öffnen“ übergibt die `.eml` an Apple Mail. Je nach Einstellung lädt Mail dabei Bilder aus dem Netz
+  (Zählpixel). Eine eigene, sichere Mailansicht in der Belegsuche gibt es noch nicht. Geöffnete Anhänge liegen bis
+  zum Beenden der Suchoberfläche als Kopie im Temp-Ordner.
 - Die Suchoberfläche hat kein Passwort. Sie ist nur auf diesem Mac erreichbar (127.0.0.1) und lehnt Anfragen mit
   fremder `Origin`/`Referer` ab, andere Benutzerkonten auf demselben Mac könnten sie aber aufrufen, solange sie läuft.
 - Das Zeitlimit beim Einlesen (10 Minuten ohne fertige Seite) gilt nur bei paralleler Verarbeitung, nicht bei

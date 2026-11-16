@@ -26,7 +26,12 @@ Mit ⌘ K springt man ins Suchfeld, mit Esc zurück zur Ordnerübersicht.*
   `Hausmeister` findet `Hauswart` · Tippfehler wie `Schornsteinfger` werden toleriert.
 - **Treffer** mit Dateiname, Ordner, Seite und markiertem Textausschnitt; Öffnen oder im Finder zeigen per Klick.
 - **E-Mails mit Anhängen**: Ein Treffer in einer Mail nennt Betreff, Absender und Datum und, falls die Fundstelle
-  in einem Anhang liegt, den Anhang und die Seite darin („Anhang 2: Rechnung.pdf, Seite 3/5“).
+  in einem Anhang liegt, den Anhang und die Seite darin („Anhang 2: Rechnung.pdf, Seite 3/5“). In der Oberfläche
+  öffnet „Mail öffnen“ die `.eml` mit Apple Mail. „Anhang öffnen“ legt eine schreibgeschützte Kopie des Anhangs in
+  einen eigenen Ordner im System-Temp (nie neben die Mail) und öffnet sie; „Seite 3 im Browser“ zeigt PDF-Anhänge
+  direkt an der Fundstelle. Die Kopien werden beim Beenden von `belegsuche start` gelöscht, Reste älter als 24 h
+  beim nächsten Start. Geöffnet werden nur PDF, Bilder, Word und Text, und nur wenn der Anhang noch derselbe ist
+  wie beim Einlesen (sonst: „Mail geändert – neu einlesen“).
 
 ## Installation
 
