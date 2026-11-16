@@ -115,6 +115,10 @@
   .mail-line { display:flex; align-items:flex-start; gap:6px; margin-top:4px; color:var(--sub); font-size:13px; line-height:1.45; overflow-wrap:anywhere }
   .mail-line .icon { width:14px; height:14px; margin-top:2px }
   .mail-line strong { color:var(--ink); font-weight:600 }
+  .links { margin-top:4px; display:flex; flex-direction:column; gap:2px; color:var(--sub); font-size:12px; line-height:1.45; overflow-wrap:anywhere }
+  .links .icon { width:12px; height:12px; margin-right:4px; vertical-align:-1px }
+  .links button { font:inherit; color:var(--accent); background:none; border:0; padding:0 0 0 4px; cursor:pointer; text-decoration:underline }
+  .links button:disabled { color:var(--muted); cursor:default; text-decoration:none }
   .path { display:flex; align-items:flex-start; gap:6px; margin-top:4px }
   .path .icon { width:14px; height:14px; margin-top:2px }
   .snip { margin-top:6px; color:var(--sub); line-height:1.5; font-size:14px; overflow-wrap:anywhere }
@@ -294,11 +298,18 @@ function hitRow(h) {
   const [kind, tileClass] = tile(h);
   const mail = h.kind === 'mail', id = Number(h.id), part = Number(h.part_no) || 0;
   const flags = [!mail && h.pages > 1 && `Seite ${h.page} von ${h.pages}`,
-                 h.ocr && (!mail || ['pdf', 'image'].includes(h.part_kind)) && 'Scan',
+                 h.ocr && !(mail && h.part_kind === 'body') && 'Scan',   // bei Mails: die Fundseite selbst (Server)
                  h.outdated && 'Wird neu eingelesen', h.duplicates.length && `${h.duplicates.length + 1}× vorhanden`].filter(Boolean);
   const label = partLabel(h);
   const path = [rootName(h.root), ...String(h.folder).split('/').filter(Boolean)].join(' / ');
   const disabled = h.available ? '' : 'disabled title="Datei nicht erreichbar"';
+  // DOMUS-Platzhalter: die Datei liegt im Vorgangsordner; „öffnen“ öffnet sie (der Server löst den Verweis auf)
+  const links = mail && Array.isArray(h.links) ? h.links : [];
+  const linkItem = l => `<span>${icon('clip')}In DOMUS abgelegt: ${esc(l.name || '(ohne Namen)')}`
+    + (l.file_id ? `<button type="button" ${disabled} onclick="openFile(${id}, false, this, ${Number(l.part_no)})">öffnen</button>`
+                 : ' (nicht im Vorgangsordner)') + '</span>';
+  const linkLine = links.length ? `<div class="links">${links.slice(0, 5).map(linkItem).join('')}`
+    + (links.length > 5 ? `<span>… und ${links.length - 5} weitere</span>` : '') + '</div>' : '';
   const mailLine = mail ? `<div class="mail-line">${icon('mail')}<span><strong>${esc(h.mail_subject || '(ohne Betreff)')}</strong>`
     + [h.mail_from, h.mail_date].filter(Boolean).map(x => ` · ${esc(x)}`).join('') + '</span></div>' : '';
   let actions;
@@ -319,6 +330,7 @@ function hitRow(h) {
     <div class="hit-body"><div class="top"><h3 class="name">${esc(h.filename)}</h3>
       ${flags.length || label ? `<span class="flags">${label ? `<span class="chip part" title="${esc(partLabel(h, true))}">${esc(label)}</span>` : ''}${flags.map(f => `<span class="chip">${esc(f)}</span>`).join('')}</span>` : ''}</div>
       ${mailLine}
+      ${linkLine}
       <div class="path" title="${esc(h.root)}/${esc(h.folder)}">${icon('folder')}<span>${esc(path)}</span></div>
       <div class="snip">${h.snippet}</div>
       ${h.missing.length ? `<div class="miss">Nicht enthalten: ${h.missing.map(esc).join(', ')}</div>` : ''}

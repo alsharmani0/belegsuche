@@ -48,10 +48,18 @@ PLACEHOLDER_MAX_BYTES = 1024
 MAX_TEXT_ATTACHMENT_BYTES = 5 * 1024 * 1024
 PLACEHOLDER_RE = re.compile(r"Die Datei '([^\n]+?)' wurde in die Dokumentenverwaltung von DOMUS (CRM|NAVI) verschoben")
 REUSED_NOTE = "Text übernommen (gleicher Inhalt schon eingelesen)"
+ENCRYPTED_NOTE = "E-Mail ist verschlüsselt (S/MIME) – nur der Kopf ist durchsuchbar"
 SAFE_NOTE = "nicht gelesen (nur Mailtext nach Zeitlimit oder Absturz)"
 SAFE_MAIL_NOTE = (f"{NOTE_PREFIX} nur Mailtext eingelesen – PDF- und Bild-Anhänge nach Zeitlimit oder Absturz "
                   "übersprungen")
 NOT_EVALUATED = "nicht ausgewertet"
+# Zeilen im Kopf von Seite 1, die angezeigt, aber nicht als Mailtext durchsucht werden (index_body_text): Namen
+# der Anhänge (stehen abgewertet in der path-Spalte, sonst stünde die Mail bei der Suche nach einem Dateinamen vor
+# der Datei selbst) und das Ersatzdatum einer Mail ohne Date-Kopf
+ATTACH_LINE = "Anhänge: "
+LINK_LINE = "Anhang in DOMUS abgelegt: "
+NO_DATE_SUFFIX = "(Änderungsdatum der Datei – Mail ohne Datum)"
+DUPLICATE_NOTE = "gleicher Inhalt wie Anhang"
 EVALUATED_KINDS = ("pdf", "image", "word", "text", "mail")
 REUSABLE_KINDS = ("pdf", "image", "word")   # Seiten 1:1 übertragbar (gleicher Inhalt = gleiche Seiten)
 
@@ -80,7 +88,8 @@ def clean(s: str | None) -> str:
 
 def _decode_bytes(raw: bytes, charset: str | None) -> str:
     """Text eines Mailteils. Ohne Angabe (oder us-ascii mit 8-Bit-Inhalt): UTF-8, sonst Windows-1252.
-    iso-8859-1 wird als Windows-1252 gelesen (Obermenge, enthält z. B. das €-Zeichen)."""
+    iso-8859-1 wird als Windows-1252 gelesen (Obermenge, enthält z. B. das €-Zeichen). Als UTF-8 angegeben, aber
+    überwiegend kein UTF-8 (falsch deklarierte alte Mails): Windows-1252."""
     cs = (charset or "").strip().strip('"').lower()
     if cs in ("", "us-ascii", "ascii", "unknown-8bit", "x-unknown", "default"):
         try:
@@ -89,6 +98,14 @@ def _decode_bytes(raw: bytes, charset: str | None) -> str:
             return raw.decode("cp1252", errors="replace")
     if cs in ("iso-8859-1", "latin-1", "latin1", "iso8859-1", "iso_8859-1", "windows-1252", "cp1252"):
         return raw.decode("cp1252", errors="replace")
+    if cs in ("utf-8", "utf8"):
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = raw.decode("utf-8", errors="replace")
+            high = sum(1 for b in raw if b >= 0x80)
+            # echtes UTF-8 mit einzelnen kaputten Bytes: ersetzen; fast jedes 8-Bit-Byte ungültig: Windows-1252
+            return raw.decode("cp1252", errors="replace") if text.count("�") * 2 > high else text
     try:
         return raw.decode(cs, errors="replace")
     except LookupError:                        # unbekannter Zeichensatz
@@ -175,18 +192,60 @@ def html_to_text(html: str) -> str:
 
 # --- Kopf ----------------------------------------------------------------------------------------------
 
-def _raw_header(msg: Message, name: str) -> str:
-    """Kopfzeile ohne die Prüfungen von policy.default (die bei kaputten Adressen Ausnahmen werfen können)."""
+_EW_RE = re.compile(r"=\?[^?\s]+\?[bBqQ]\?[^?\s]*\?=")
+
+
+def _decode_words(s: str) -> str:
+    """=?charset?Q?…?=-Wörter (RFC 2047) in einem schon dekodierten Text auflösen; Kaputtes bleibt stehen."""
+    def one(m):
+        try:
+            return str(make_header(decode_header(m.group(0))))
+        except Exception:
+            return m.group(0)
+    s = re.sub(r"(\?=)[ \t\r\n]+(=\?)", r"\1\2", s)      # Leerraum zwischen zwei kodierten Wörtern zählt nicht
+    return _EW_RE.sub(one, s)
+
+
+def _has_8bit(v: str) -> bool:
+    """Rohe 8-Bit-Zeichen in einer Kopfzeile (der Parser hält sie als Surrogate U+DC80..U+DCFF fest)."""
+    return any("\udc80" <= c <= "\udcff" for c in v)
+
+
+def _from_8bit(v: str) -> str:
+    """Kopfzeile mit rohen 8-Bit-Zeichen (ohne =?…?=): UTF-8, sonst Windows-1252 (alte Programme, Latin-1).
+    policy.default nimmt immer UTF-8 an und macht aus „Müller“ in Latin-1 „M�ller“."""
+    raw = v.encode("utf-8", errors="surrogateescape")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("cp1252", errors="replace")
+    return _decode_words(text)
+
+
+def _raw_value(msg: Message, name: str) -> str | None:
     for k, v in msg.raw_items():
         if k.lower() == name.lower():
-            try:
-                return str(make_header(decode_header(str(v))))
-            except Exception:
-                return str(v)
-    return ""
+            return v if isinstance(v, str) else str(v)
+    return None
+
+
+def _raw_header(msg: Message, name: str) -> str:
+    """Kopfzeile ohne die Prüfungen von policy.default (die bei kaputten Adressen Ausnahmen werfen können)."""
+    v = _raw_value(msg, name)
+    if v is None:
+        return ""
+    if _has_8bit(v):
+        return _from_8bit(v)
+    try:
+        return str(make_header(decode_header(v)))
+    except Exception:
+        return v
 
 
 def header(msg: Message, name: str) -> str:
+    raw = _raw_value(msg, name)
+    if raw is not None and _has_8bit(raw):
+        return clean(_from_8bit(raw))
     try:
         v = msg.get(name)
         v = "" if v is None else str(v)
@@ -230,8 +289,10 @@ def read_head(msg: Message, mtime: float | None) -> _Head:
     if dt is not None:
         lines.append(f"Datum: {dt.strftime('%d.%m.%Y %H:%M')}")
     elif mtime is not None:
-        dt = datetime.fromtimestamp(mtime).astimezone()
-        lines.append(f"Datum: {dt.strftime('%d.%m.%Y %H:%M')} (Änderungsdatum der Datei – Mail ohne Datum)")
+        # nur zur Anzeige: nicht durchsuchbar (index_body_text) und nicht in mails.sent_at – sonst träfe die Suche
+        # nach einem Exportdatum alle Mails ohne Date-Kopf
+        fdt = datetime.fromtimestamp(mtime).astimezone()
+        lines.append(f"Datum: {fdt.strftime('%d.%m.%Y %H:%M')} {NO_DATE_SUFFIX}")
     if header(msg, "X-Unsent") == "1":
         lines.append("Entwurf (nicht gesendet)")
     sent_at = None
@@ -256,6 +317,26 @@ class _Leaf:
     text: str | None = None                # kaputtes multipart (Grenze fehlt): roher Inhalt
 
 
+_B64_LINE_RE = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
+_MIME_LINE_RE = re.compile(r"(?i)(?:content-[\w-]+|mime-version)\s*:|--[^\s]{1,200}$")
+
+
+def _raw_mime_text(raw: str) -> str:
+    """Rohinhalt eines multipart-Teils, dessen Grenze im Inhalt fehlt: lesbarer Text ohne base64-Blöcke (kodierte
+    Anhänge), MIME-Kopfzeilen und Grenzzeilen – sonst landeten Megabytes Zeichensalat im Suchindex."""
+    out: list[str] = []
+    in_head = False                    # Fortsetzungszeilen einer übersprungenen MIME-Kopfzeile
+    for line in raw.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        s = line.strip()
+        if in_head and s and line[:1] in (" ", "\t"):
+            continue
+        in_head = bool(_MIME_LINE_RE.match(s))
+        if in_head or _B64_LINE_RE.fullmatch(s):
+            continue
+        out.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+
+
 def _leaves(msg: Message) -> list[_Leaf]:
     out: list[_Leaf] = []
     stack: list[tuple[Message, str, int | None]] = [(msg, "", None)]
@@ -272,11 +353,24 @@ def _leaves(msg: Message) -> list[_Leaf]:
         leaf_path = path or "1"
         if part.get_content_maintype() == "multipart":       # Grenze fehlt: Inhalt ist ein String
             raw = part.get_payload()
-            if isinstance(raw, str) and raw.strip():
-                out.append(_Leaf(part, leaf_path, alt, text=raw))
+            if isinstance(raw, str) and (text := _raw_mime_text(raw)).strip():
+                out.append(_Leaf(part, leaf_path, alt, text=text))
             continue
         out.append(_Leaf(part, leaf_path, alt))
     return out
+
+
+def _filename_8bit(part: Message) -> str | None:
+    """Dateiname aus Kopfzeilen mit rohen 8-Bit-Zeichen (Latin-1/UTF-8 ohne =?…?=), siehe _from_8bit."""
+    m = Message()                                    # compat32: Parameter ohne die UTF-8-Annahme
+    for k, v in part.raw_items():
+        if k.lower() in ("content-disposition", "content-type"):
+            m[k] = _from_8bit(v) if _has_8bit(v) else v
+    try:
+        name = m.get_filename()
+    except Exception:
+        return None
+    return _decode_words(name) if name else None
 
 
 def _filename(part: Message) -> str:
@@ -284,6 +378,8 @@ def _filename(part: Message) -> str:
         name = part.get_filename()
     except Exception:
         name = None
+    if name and "�" in name:
+        name = _filename_8bit(part) or name
     if not name:
         try:
             name = part.get_param("name")
@@ -384,6 +480,46 @@ class _Att:
         return self._sha
 
 
+def _encoded_rfc822(part: Message) -> str | None:
+    """Angehängte Mail mit base64/quoted-printable (eigentlich nicht erlaubt, kommt aber vor): Rohtext der Kodierung.
+    Der Parser zerlegt so einen Teil trotzdem als Mail – dann steht die ganze Kodierung als Text in deren Inhalt."""
+    try:
+        cte = str(part.get("content-transfer-encoding", "")).strip().lower()
+    except Exception:
+        return None
+    if cte not in ("base64", "quoted-printable"):
+        return None
+    try:
+        inner = part.get_payload(0)
+        raw = inner.get_payload() if not inner.is_multipart() else None
+        if not isinstance(raw, str):
+            return None
+        keys = [k for k, _ in inner.raw_items()]
+    except Exception:
+        return None
+    # kodierter Text hat keine Kopfzeilen; gingen welche durch, steht der Anfang dort – dann aufgeben
+    return raw if not keys else None
+
+
+def _rfc822_bytes(part: Message) -> bytes:
+    """Bytes der in einem message/rfc822-Teil angehängten Mail."""
+    enc = _encoded_rfc822(part)
+    if enc is not None:
+        try:
+            cte = str(part.get("content-transfer-encoding", "")).strip().lower()
+            if cte == "base64":
+                b64 = re.sub(r"[^A-Za-z0-9+/]", "", enc)
+                return base64.b64decode(b64 + "=" * (-len(b64) % 4))
+            import quopri
+            return quopri.decodestring(enc.encode("ascii", errors="surrogateescape"))
+        except (binascii.Error, ValueError):
+            return b""
+    try:
+        return part.get_payload(0).as_bytes(policy=policy.default)
+    except Exception:
+        return b""
+
+
 def _classify(lf: _Leaf, depth: int) -> _Att:
     """Art eines Anhangs an seinem Inhalt (nicht an der Angabe in der Mail)."""
     part = lf.part
@@ -391,11 +527,7 @@ def _classify(lf: _Leaf, depth: int) -> _Att:
     name = _filename(part)
     inline = _disposition(part) != "attachment"
     if mime == "message/rfc822":
-        try:
-            inner = part.get_payload(0)
-            data = inner.as_bytes(policy=policy.default)
-        except Exception:
-            data = b""
+        data = _rfc822_bytes(part)
         att = _Att(part, lf.path, name or "Weitergeleitete Mail.eml", mime, inline, data, "mail")
         if depth >= MAX_DEPTH:
             att.kind, att.note = "skipped", f"{NOT_EVALUATED} (zu tief verschachtelte Mail)"
@@ -497,24 +629,58 @@ def _encrypted(msg: Message) -> bool:
     return msg.get_content_type() in _ENCRYPTED_TYPES
 
 
-def attachment_shas(data: bytes, depth: int = 0) -> list[str]:
-    """SHA-256 der Anhänge, deren Seiten sich von gleichem Inhalt übernehmen lassen (PDF, Bild, Word) –
-    auch in angehängten Mails. Billig (nur Zerlegen, keine Texterkennung): der Hauptprozess sucht damit
-    vor dem Einlesen schon bekannte Seiten."""
-    try:
-        msg = parse(data)
-        leaves = _leaves(msg)
-        _, used = _body_text(msg, leaves)
-        atts = _attachments(msg, leaves, used, depth)
-    except Exception:
+_MAYBE_ATTACHMENT_RE = re.compile(
+    rb"(?im)^content-(?:type:\s*(?:application|image|message|audio|video|model)/|disposition:\s*attachment)")
+
+
+def _parse_fast(data: bytes) -> Message:
+    """Zerlegen ohne die Kopfzeilen-Objekte von policy.default: um ein Vielfaches schneller, und kein quadratischer
+    Aufwand bei präparierten Kopfzeilen (z. B. 20.000 RFC-2231-Teile im Dateinamen). Die Inhalte der Teile (und
+    damit ihre sha256) sind dieselben wie beim Einlesen."""
+    return BytesParser(policy=policy.compat32).parsebytes(data)
+
+
+def _shas_of(msg: Message, depth: int) -> list[str]:
+    if _encrypted(msg):
         return []
     out: list[str] = []
-    for att in atts:
+    for lf in _leaves(msg):
+        if _is_body_text(lf):          # Mailtext (wie _body_text): kein Anhang
+            continue
+        part = lf.part
+        if part.get_content_type() == "message/rfc822":
+            if depth + 1 > MAX_DEPTH:
+                continue
+            if _encoded_rfc822(part) is None and isinstance(inner := _first_payload(part), Message):
+                out.extend(_shas_of(inner, depth + 1))
+            else:
+                out.extend(_shas_of(_parse_fast(_rfc822_bytes(part)), depth + 1))
+            continue
+        att = _classify_safe(lf, depth)
         if att.kind in REUSABLE_KINDS:
             out.append(att.sha)
         elif att.kind == "mail":
-            out.extend(attachment_shas(att.data, depth + 1))
+            out.extend(_shas_of(_parse_fast(att.data), depth + 1))
     return out
+
+
+def _first_payload(part: Message):
+    try:
+        return part.get_payload(0)
+    except Exception:
+        return None
+
+
+def attachment_shas(data: bytes, depth: int = 0) -> list[str]:
+    """SHA-256 der Anhänge, deren Seiten sich von gleichem Inhalt übernehmen lassen (PDF, Bild, Word) –
+    auch in angehängten Mails. Billig (nur Zerlegen, keine Texterkennung): der Hauptprozess sucht damit
+    vor dem Einlesen schon bekannte Seiten. Läuft ohne Zeitlimit im Hauptprozess, daher _parse_fast."""
+    if not _MAYBE_ATTACHMENT_RE.search(data):       # reine Text-/HTML-Mail: nichts zu zerlegen
+        return []
+    try:
+        return _shas_of(_parse_fast(data), depth)
+    except Exception:                  # auch RecursionError (tief verschachtelt): nur ein Vorabblick
+        return []
 
 
 def _resolve(msg: Message, seg: str) -> Message | None:
@@ -546,7 +712,12 @@ def find_part(data: bytes, mime_path: str) -> bytes | None:
                 return None
             if n == len(segs) - 1:
                 return _classify(_Leaf(part, seg), 0).data
-            msg = part.get_payload(0) if part.get_content_type() == "message/rfc822" else parse(_payload(part))
+            if part.get_content_type() == "message/rfc822" and _encoded_rfc822(part) is None:
+                msg = part.get_payload(0)
+            elif part.get_content_type() == "message/rfc822":
+                msg = parse(_rfc822_bytes(part))
+            else:
+                msg = parse(_payload(part))
     except Exception:
         return None
     return None
@@ -579,6 +750,21 @@ class _Ctx:
                         mime_path=prefix + att.path, note=note)
         self.parts.append(info)
         return info
+
+
+def index_body_text(text: str) -> str:
+    """Suchtext einer Seite mit Mailkopf (Seite 1, angehängte Mail): ohne die Zeilen mit den Anhangnamen und ohne
+    das Ersatzdatum (Änderungszeit der Datei). Angezeigt wird die Seite unverändert (siehe db.index_file_text)."""
+    head, sep, rest = text.partition("\n\n")
+    keep = [ln for ln in head.split("\n")
+            if not ln.startswith((ATTACH_LINE, LINK_LINE)) and not ln.endswith(NO_DATE_SUFFIX)]
+    return "\n".join(keep) + sep + rest
+
+
+def link_target(mail_path: Path, root: str | None, name: str) -> str | None:
+    """Pfad (relativ zum eingelesenen Ordner, Schreibweise wie auf der Platte) der Datei `name` im Vorgangsordner
+    der Mail – das Ziel eines DOMUS-Platzhalters. None, wenn sie dort nicht liegt."""
+    return _Folder(Path(mail_path), root).find(name)
 
 
 class _Folder:
@@ -625,7 +811,7 @@ def _read_attachment(att: _Att, ctx: _Ctx, depth: int, prefix: str, folder: _Fol
     sha = att.sha
     if sha in ctx.seen:
         if not (att.inline and att.kind == "image"):
-            ctx.add_part(att, att.kind, [], f"gleicher Inhalt wie Anhang {ctx.seen[sha]}", prefix)
+            ctx.add_part(att, att.kind, [], f"{DUPLICATE_NOTE} {ctx.seen[sha]}", prefix)
         return
     room = MAX_MAIL_PAGES - len(ctx.pages)
     if room <= 0:
@@ -642,6 +828,10 @@ def _read_attachment(att: _Att, ctx: _Ctx, depth: int, prefix: str, folder: _Fol
     if known:
         pages = known[:room]
         note = REUSED_NOTE
+        if len(known) > room:
+            # gekürzt: kein „übernommen“ ohne Einschränkung, sonst übernähme eine spätere Kopie nur diese Seiten
+            note = f"{REUSED_NOTE}; nur die ersten {room} von {len(known)} Seiten eingelesen"
+            ctx.page_limit_hit = True
         ctx.reused_ocr += sum(1 for p in pages if p.source != "text")
     elif ctx.safe and att.kind in ("pdf", "image"):
         ctx.skipped_safe += 1
@@ -655,7 +845,11 @@ def _read_attachment(att: _Att, ctx: _Ctx, depth: int, prefix: str, folder: _Fol
                 pages = extract_image_bytes(att.data, ctx.engine, sub, max_pages=room)
             elif att.kind == "word":
                 from .word import word_pages
-                pages = word_pages(att.data, sub)[:room]
+                pages = word_pages(att.data, sub)
+                if len(pages) > room:
+                    sub.append(f"{NOTE_PREFIX} nur die ersten {room} von {len(pages)} Seiten eingelesen")
+                    ctx.page_limit_hit = True
+                    pages = pages[:room]
             else:   # text
                 t = _decode_bytes(att.data, att.part.get_content_charset())
                 if att.mime == "text/html" or att.name.lower().endswith((".htm", ".html")):
@@ -680,18 +874,19 @@ def _read_message(msg: Message, ctx: _Ctx, depth: int, prefix: str, folder: _Fol
                   mtime: float | None) -> tuple[_Head, str, list[_Att]]:
     head = read_head(msg, mtime)
     if _encrypted(msg):
-        ctx.notes.append(f"{NOTE_PREFIX} E-Mail ist verschlüsselt (S/MIME) – nur der Kopf ist durchsuchbar")
-        return head, "", []
+        if depth == 0:     # bei einer angehängten Mail steht der Hinweis an deren Teil (_read_nested)
+            ctx.notes.append(f"{NOTE_PREFIX} {ENCRYPTED_NOTE}")
+        return head, "\n".join(head.lines), []
     leaves = _leaves(msg)
     body, used = _body_text(msg, leaves)
     atts = _attachments(msg, leaves, used, depth)
     lines = list(head.lines)
     names = [a.name for a in atts if a.kind != "link" and a.name]
     if names:
-        lines.append("Anhänge: " + ", ".join(dict.fromkeys(names)))
+        lines.append(ATTACH_LINE + ", ".join(dict.fromkeys(names)))
     for a in atts:
         if a.kind == "link":
-            lines.append(f"Anhang in DOMUS abgelegt: {a.link}")
+            lines.append(LINK_LINE + a.link)
     text = "\n".join(lines) + ("\n\n" + body if body else "")
     return head, text, atts
 
@@ -704,13 +899,24 @@ def _read_nested(att: _Att, ctx: _Ctx, depth: int, prefix: str, folder: _Folder)
         _, text, atts = _read_message(inner, ctx, depth, sub_prefix, folder, None)
     except Exception as e:
         return ctx.add_part(att, "mail", [], f"nicht lesbar ({type(e).__name__})", prefix)
-    info = ctx.add_part(att, "mail", [PageText(1, "Weitergeleitete Mail\n" + text, "text")], None, prefix)
+    note = ENCRYPTED_NOTE if _encrypted(inner) else None
+    info = ctx.add_part(att, "mail", [PageText(1, "Weitergeleitete Mail\n" + text, "text")], note, prefix)
     _page_done()
     for a in atts:
         _read_attachment(a, ctx, depth, sub_prefix, folder)
         a.data = b""
         _page_done()
     return info
+
+
+def _head_only(raw: bytes, st: os.stat_result, ctx: _Ctx, why: str) -> Extracted:
+    """Nur der Mailkopf als Seite 1 (Mail zu groß oder nicht zerlegbar)."""
+    msg = BytesHeaderParser(policy=policy.default).parsebytes(raw)
+    head = read_head(msg, st.st_mtime)
+    ctx.notes.append(f"{NOTE_PREFIX} {why}")
+    ctx.pages[:] = [PageText(1, "\n".join(head.lines), "text")]
+    ctx.parts[:] = [PartInfo(0, "body", 1, 1, mime="message/rfc822", size=st.st_size)]
+    return Extracted(ctx.pages, ctx.notes, ctx.parts, head.info)
 
 
 def extract_mail(path: Path, engine, *, known: dict | None = None, safe: bool = False,
@@ -728,16 +934,16 @@ def extract_mail(path: Path, engine, *, known: dict | None = None, safe: bool = 
         return Extracted(ctx.pages, notes, ctx.parts, MailInfo())
     if st.st_size > MAX_MAIL_BYTES:
         with open(path, "rb") as f:
-            msg = BytesHeaderParser(policy=policy.default).parsebytes(f.read(1 << 20))
-        head = read_head(msg, st.st_mtime)
-        notes.append(f"{NOTE_PREFIX} E-Mail zu groß ({st.st_size // (1024 * 1024)} MB) – nur der Kopf eingelesen")
-        ctx.pages.append(PageText(1, "\n".join(head.lines), "text"))
-        ctx.parts.append(PartInfo(0, "body", 1, 1, mime="message/rfc822", size=st.st_size))
-        return Extracted(ctx.pages, notes, ctx.parts, head.info)
+            raw = f.read(1 << 20)
+        return _head_only(raw, st, ctx, f"E-Mail zu groß ({st.st_size // (1024 * 1024)} MB) – nur der Kopf eingelesen")
     with open(path, "rb") as f:
         data = f.read()
-    msg = parse(data)
-    head, text, atts = _read_message(msg, ctx, 0, "", folder, st.st_mtime)
+    try:
+        msg = parse(data)
+        head, text, atts = _read_message(msg, ctx, 0, "", folder, st.st_mtime)
+    except RecursionError:
+        # tausendfach verschachtelte Teile (präpariert oder kaputt): nicht die ganze Mail verlieren
+        return _head_only(data[:1 << 20], st, ctx, "Aufbau der E-Mail zu tief verschachtelt – nur der Kopf eingelesen")
     ctx.pages.append(PageText(1, text, "text"))
     ctx.parts.append(PartInfo(0, "body", 1, 1, mime="message/rfc822", size=len(data), mime_path=""))
     del data

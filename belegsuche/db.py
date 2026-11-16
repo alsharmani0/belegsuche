@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS mails (
     subject    TEXT,
     sender     TEXT,
     recipients TEXT,
-    sent_at    TEXT,                    -- ISO 8601; fehlt Date:, die Änderungszeit der Datei
+    sent_at    TEXT,                    -- ISO 8601 aus dem Date-Kopf; NULL, wenn er fehlt
     message_id TEXT
 );
 """
@@ -195,8 +195,9 @@ def german_date(iso: str | None, with_time: bool = True) -> str:
     return dt.strftime("%d.%m.%Y %H:%M" if with_time else "%d.%m.%Y")
 
 
-def _mail_path_texts(con: sqlite3.Connection, file_id: int) -> tuple[str, list[tuple[int, int, str]]] | None:
-    """Für E-Mails: Mailkopf als Suchtext und die Seitenbereiche der Anhänge mit ihrem Namen."""
+def _mail_path_texts(con: sqlite3.Connection, file_id: int):
+    """Für E-Mails: Mailkopf als Suchtext, die Seitenbereiche der Anhänge mit ihrem Namen, die Namen der Anhänge
+    ohne eigene Seiten (Platzhalter, nicht ausgewertet) und die Seiten mit Mailkopf (Mailtext, angehängte Mails)."""
     try:
         row = con.execute("SELECT subject, sender, recipients, sent_at FROM mails WHERE file_id = ?",
                           (file_id,)).fetchone()
@@ -205,11 +206,20 @@ def _mail_path_texts(con: sqlite3.Connection, file_id: int) -> tuple[str, list[t
     if row is None:
         return None
     from .normalize import index_text
+    # sent_at fehlt bei Mails ohne Date-Kopf: dann steht kein (Ersatz-)Datum im Suchtext
     head = index_text(" ".join(x for x in (row[0], row[1], row[2], german_date(row[3], False)) if x))
-    ranges = [(r[0], r[0] + r[1] - 1, r[2]) for r in con.execute(
-        "SELECT first_page, n_pages, name FROM parts WHERE file_id = ? AND n_pages > 0 AND first_page IS NOT NULL"
-        " AND part_no > 0 AND name IS NOT NULL", (file_id,))]
-    return head, ranges
+    ranges, unpaged, head_pages = [], [], set()
+    for first, n, name, kind, part_no in con.execute(
+            "SELECT first_page, n_pages, name, kind, part_no FROM parts WHERE file_id = ? ORDER BY part_no",
+            (file_id,)):
+        if n > 0 and first is not None:
+            if part_no == 0 or kind == "mail":
+                head_pages.update(range(first, first + n))
+            if part_no > 0 and name:
+                ranges.append((first, first + n - 1, name))
+        elif part_no > 0 and name:
+            unpaged.append(name)
+    return head, ranges, unpaged, head_pages
 
 
 def index_file_text(con: sqlite3.Connection, file_id: int, relpath: str) -> None:
@@ -217,24 +227,72 @@ def index_file_text(con: sqlite3.Connection, file_id: int, relpath: str) -> None
 
     Bei E-Mails stehen Betreff, Absender, Empfänger und Datum in der path-Spalte aller Seiten (auch der
     Anhangseiten) und dazu der Name des Anhangs, zu dem die Seite gehört: „Absender + Betrag im Anhang“ passt so
-    auch auf Seite 3 eines Anhangs (Treffer in der path-Spalte zählen abgewertet, siehe search.PATH_FACTOR)."""
+    auch auf Seite 3 eines Anhangs (Treffer in der path-Spalte zählen abgewertet, siehe search.PATH_FACTOR).
+    Die Zeilen „Anhänge: …“ und „Anhang in DOMUS abgelegt: …“ im Kopf von Seite 1 zählen nicht als Mailtext: die
+    Namen stehen in der path-Spalte der Anhangseiten bzw. (Anhänge ohne eigene Seiten) von Seite 1. Sonst stünde
+    die Mail bei der Suche nach einem Dateinamen vor der Datei selbst."""
     from .normalize import index_text, path_index_text
     delete_search_rows(con, file_id)
     ptext = f"{path_index_text(relpath)} {FILE_TOKEN}{file_id}"   # Dateikennung: Seiten einer Datei gezielt abfragen
     mail = _mail_path_texts(con, file_id)
+    if mail is not None:
+        from .mail import index_body_text
     bodies = []
     for pid, page_no, text in con.execute("SELECT id, page_no, text FROM pages WHERE file_id = ? ORDER BY page_no",
                                           (file_id,)).fetchall():
-        body = index_text(text)
-        bodies.append(body)
         path = ptext
         if mail is not None:
-            head, ranges = mail
+            head, ranges, unpaged, head_pages = mail
+            if page_no in head_pages:
+                text = index_body_text(text)
             name = next((n for a, b, n in ranges if a <= page_no <= b), "")
-            path = " ".join(x for x in (ptext, head, path_index_text(name) if name else "") if x)
+            names = " ".join(unpaged) if page_no == 1 else name
+            path = " ".join(x for x in (ptext, head, path_index_text(names) if names else "") if x)
+        body = index_text(text)
+        bodies.append(body)
         con.execute("INSERT INTO fts(rowid, path, body) VALUES (?, ?, ?)", (pid, path, body))
     if len(bodies) > 1:
         con.execute("INSERT INTO fts_doc(rowid, body) VALUES (?, ?)", (file_id, " ".join(bodies)))
+
+
+def linked_file_id(con: sqlite3.Connection, root_id: int, relpath: str) -> int | None:
+    """Datei im Index, auf die ein DOMUS-Platzhalter verweist (parts.note): gleicher Ordner, gleicher Pfad – auch
+    bei anderer Unicode-Schreibweise der Umlaute (NFC/NFD) und anderer Groß-/Kleinschreibung."""
+    import unicodedata
+    row = con.execute(f"SELECT id FROM files WHERE root_id = ? AND relpath = ? AND status IN {SEARCHABLE_SQL}",
+                      (root_id, relpath)).fetchone()
+    if row:
+        return row[0]
+    want = unicodedata.normalize("NFC", relpath).casefold()
+    # Kandidaten im selben Ordner; Umlaute im Pfad können anders geschrieben sein: nur der ASCII-Anfang zählt
+    head = os.path.dirname(relpath)
+    head = head[:next((i for i, c in enumerate(head) if not c.isascii()), len(head))]
+    for fid, rel in con.execute(f"SELECT id, relpath FROM files WHERE root_id = ? AND relpath >= ? AND relpath < ?"
+                                f" AND status IN {SEARCHABLE_SQL}", (root_id, head, head + "\U0010ffff")):
+        if unicodedata.normalize("NFC", rel).casefold() == want:
+            return fid
+    return None
+
+
+def path_inside(path: str, root: str) -> bool:
+    """Liegt path in root (oder ist root)? Ohne Symlinks, auch bei anderer Groß-/Kleinschreibung."""
+    rp, rr = os.path.realpath(path), os.path.realpath(root)
+    for a, b in ((rp, rr), (rp.casefold(), rr.casefold())):
+        if a == b or a.startswith(b.rstrip("/") + "/"):
+            return True
+    if os.path.isdir(rr):
+        p = rp
+        while True:
+            try:
+                if os.path.exists(p) and os.path.samefile(p, rr):
+                    return True
+            except OSError:
+                pass
+            parent = os.path.dirname(p)
+            if parent == p:
+                break
+            p = parent
+    return False
 
 
 def has_table(con: sqlite3.Connection, name: str) -> bool:

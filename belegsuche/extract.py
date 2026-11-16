@@ -404,12 +404,34 @@ def extract_image(path: Path, engine, notes: list[str] | None = None) -> list[Pa
 
 # --- Bilder aus Bytes (Mail-Anhänge) --------------------------------------------------------------
 
+_PDF_RE = re.compile(rb"%PDF-\d")
+_BMP_HEADER_SIZES = {12, 40, 52, 56, 64, 108, 124}
+
+
+def _pdf_after_preamble(head: bytes) -> bool:
+    """„%PDF-“ nicht am Anfang, aber in den ersten 1024 Bytes (das lassen PDF-Leser zu): nur nach einem binären
+    Vorspann (z. B. MacBinary) oder Leerraum – ein Textanhang, der „%PDF-1.4“ irgendwo erwähnt, ist kein PDF."""
+    m = _PDF_RE.search(head)
+    if m is None:
+        return False
+    pre = head[:m.start()]
+    return not pre.removeprefix(b"\xef\xbb\xbf").strip() or any(b < 0x09 or 0x0E <= b < 0x20 or b == 0x7F
+                                                                 for b in pre)
+
+
+def _plausible_bmp(head: bytes, size: int) -> bool:
+    """BMP-Kopf: bekannte Länge des DIB-Kopfs an Stelle 14 – „BMW Niederlassung …“ als Text ist kein Bild."""
+    if len(head) < 26 or size <= 26:
+        return False
+    return int.from_bytes(head[14:18], "little") in _BMP_HEADER_SIZES
+
+
 def sniff(data: bytes) -> str | None:
     """Dateiart an den ersten Bytes: pdf | png | jpeg | gif | tiff | heic | bmp | webp | zip | ole | rtf |
     appledouble | tnef – oder None. Mail-Anhänge heißen oft application/octet-stream; die Angabe in der Mail
     und die Endung sind kein Beleg für den Inhalt."""
     head = bytes(data[:16])
-    if head.startswith(b"%PDF") or b"%PDF-" in bytes(data[:1024]):
+    if head.startswith(b"%PDF") or _pdf_after_preamble(bytes(data[:1024])):
         return "pdf"
     if head.startswith(b"\x89PNG\r\n\x1a\n"):
         return "png"
@@ -422,7 +444,7 @@ def sniff(data: bytes) -> str | None:
     if head[4:8] == b"ftyp" and head[8:12] in (b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"mif1",
                                                  b"msf1"):
         return "heic"
-    if head.startswith(b"BM") and len(data) > 26:
+    if head.startswith(b"BM") and _plausible_bmp(bytes(data[:30]), len(data)):
         return "bmp"
     if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
         return "webp"

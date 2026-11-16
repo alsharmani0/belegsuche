@@ -20,6 +20,7 @@ import stat
 import time
 import unicodedata
 from dataclasses import dataclass, field
+from multiprocessing.context import SpawnContext, SpawnProcess
 from pathlib import Path
 from typing import IO, Callable
 
@@ -410,10 +411,12 @@ def _write_pages(con, file_id: int, relpath: str, res: Extracted | list[PageText
         con.execute("INSERT INTO pages(file_id, page_no, text, source, ocr_conf) VALUES (?, ?, ?, ?, ?)",
                     (file_id, p.page_no, text, p.source, p.ocr_conf))
     for t in res.parts:
+        # Platzhalter: note ist der Pfad der Datei so wie auf der Platte (wie files.relpath), nicht umgeformt
+        note = t.note if t.kind == "link" else _nfc(t.note)
         con.execute("INSERT INTO parts(file_id, part_no, first_page, n_pages, kind, name, mime, size, sha256,"
                     " mime_path, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (file_id, t.part_no, t.first_page, t.n_pages, t.kind, _nfc(t.name), t.mime, t.size, t.sha256,
-                     t.mime_path, _nfc(t.note)))
+                     t.mime_path, note))
     if res.mail is not None:
         m = res.mail
         con.execute("INSERT INTO mails(file_id, subject, sender, recipients, sent_at, message_id)"
@@ -484,23 +487,27 @@ def _pages_as_attachment(con, sha: str) -> list[PageText] | None:
         return None
 
 
-def _known_pages(con, full: str) -> dict[str, list[PageText]]:
+def _known_pages(con, full: str) -> tuple[dict[str, list[PageText]], frozenset[str]]:
     """E-Mail: Seiten der Anhänge, deren Inhalt schon eingelesen ist (sha256 -> Seiten). Der Arbeitsprozess
-    übernimmt sie statt erneuter Texterkennung. Nur ein Vorabblick: Fehler hier verhindern nichts."""
+    übernimmt sie statt erneuter Texterkennung. Dazu die sha256 der übrigen Anhänge (noch zu lesen): Mails mit
+    demselben Anhang warten im parallelen Lauf, bis er einmal gelesen ist. Nur ein Vorabblick: Fehler hier
+    verhindern nichts."""
     from .mail import MAX_MAIL_BYTES, attachment_shas
     try:
         if os.path.getsize(full) > MAX_MAIL_BYTES:
-            return {}
+            return {}, frozenset()
         with open(full, "rb") as f:
             data = f.read()
-        known = {}
+        known, pending = {}, set()
         for sha in dict.fromkeys(attachment_shas(data)):
             pages = _pages_for_sha(con, sha)
             if pages:
                 known[sha] = pages
-        return known
+            else:
+                pending.add(sha)
+        return known, frozenset(pending)
     except (OSError, ValueError, sqlite3.Error):
-        return {}
+        return {}, frozenset()
 
 
 def _note_of(con, file_id: int) -> str | None:
@@ -580,8 +587,9 @@ def _file_signature(s: os.stat_result) -> tuple:
 def _prepare(con, r):
     """Markiert die Datei als 'in Arbeit', berechnet den Hash und prüft, ob der Text schon bekannt ist.
 
-    Rückgabe: (stat, sha256, Extracted oder None, übernommen?, bekannte Anhangseiten (nur E-Mails) oder None).
-    Bei gleichem Inhalt werden auch Teile und Mailkopf übernommen.
+    Rückgabe: (stat, sha256, Extracted oder None, übernommen?, bekannte Anhangseiten (nur E-Mails) oder None,
+    sha256 der noch nicht bekannten Anhänge (nur E-Mails)). Bei gleichem Inhalt werden auch Teile und Mailkopf
+    übernommen.
     """
     fid = r["id"]
     con.execute("UPDATE files SET status='processing', attempts=attempts+1 WHERE id=?", (fid,))
@@ -589,18 +597,32 @@ def _prepare(con, r):
     full = os.path.join(r["root"], r["relpath"])
     s = os.stat(full)
     sha = sha256_file(full)
+    none: frozenset[str] = frozenset()
     if r["sha256"] == sha and con.execute("SELECT 1 FROM pages WHERE file_id=? LIMIT 1", (fid,)).fetchone():
-        return s, sha, _stored(con, fid), True, None
+        return s, sha, _stored(con, fid), True, None, none
     src = con.execute(
         "SELECT f.id FROM files f WHERE f.sha256 = ? AND f.id != ? AND f.status IN ('done', 'missing')"
         " AND EXISTS (SELECT 1 FROM pages p WHERE p.file_id = f.id) LIMIT 1", (sha, fid)).fetchone()
     if src:
-        return s, sha, _stored(con, src[0]), True, None
+        res = _stored(con, src[0])
+        if _is_mail(r):
+            _relink(res, full, r["root"])
+        return s, sha, res, True, None, none
     if _is_mail(r):
-        return s, sha, None, False, _known_pages(con, full)
+        known, pending = _known_pages(con, full)
+        return s, sha, None, False, known, pending
     if pages := _pages_as_attachment(con, sha):
-        return s, sha, Extracted(pages), True, None       # Inhalt schon als Mail-Anhang eingelesen
-    return s, sha, None, False, None
+        return s, sha, Extracted(pages), True, None, none   # Inhalt schon als Mail-Anhang eingelesen
+    return s, sha, None, False, None, none
+
+
+def _relink(res: Extracted, full: str, root: str) -> None:
+    """Gleiche Mail an anderem Ort übernommen: Verweise der DOMUS-Platzhalter auf den eigenen Vorgangsordner
+    beziehen (die Kopie kennt nur die Dateien neben sich, nicht die neben der ersten Fassung)."""
+    from .mail import link_target
+    for t in res.parts:
+        if t.kind == "link":
+            t.note = link_target(Path(full), root, t.name) if t.name else None
 
 
 def _row_get(r, key: str, default=None):
@@ -669,7 +691,14 @@ class _Progress:
         ps.reused += reused
         ps.pages += len(pages)
         ps.ocr_pages += 0 if reused else max(0, ocr_pages - res.reused_ocr_pages)
-        info = "übernommen (gleicher Inhalt schon bekannt)" if reused else f"{len(pages)} S., {ocr_pages} per OCR"
+        if reused:
+            info = "übernommen (gleicher Inhalt schon bekannt)"
+        else:
+            # Seiten, deren Text von gleichem Inhalt übernommen wurde, liefen nicht durch die Texterkennung
+            fresh = max(0, ocr_pages - res.reused_ocr_pages)
+            info = f"{len(pages)} S., {fresh} per OCR"
+            if res.reused_ocr_pages:
+                info += f", {res.reused_ocr_pages} OCR-Seiten übernommen"
         if not reused and res.mail is not None:
             n_att = len(res.parts) - 1
             if n_att > 0:
@@ -772,7 +801,7 @@ def _process_sequential(con, todo, engine, prog: _Progress) -> None:
             try:
                 if _root_gone(r["root"]):
                     raise _RootLost(r["root"])
-                s, sha, res, reused, known = _prepare(con, r)
+                s, sha, res, reused, known, _ = _prepare(con, r)
                 if res is None:
                     res = _extract_local(r, engine, known)
                 prog.finish(r, s, sha, res, reused, t0)
@@ -793,13 +822,20 @@ def _process_sequential(con, todo, engine, prog: _Progress) -> None:
 _WORKER_ENGINE = None
 
 
-def _init_worker(engine_name: str) -> None:
+def _init_worker(engine_name: str, temp_dir: str | None = None) -> None:
     global _WORKER_ENGINE
     import signal
     # Ctrl+C, Terminal-Fenster schließen, Abmelden: das regelt der Hauptprozess (setzt offene
     # Dateien zurück und beendet die Arbeitsprozesse). Sonst zählte jedes Schließen als Absturz.
+    # Der Pool selbst beendet seine Prozesse mit SIGKILL (siehe _HardStopProcess).
     for sig in (signal.SIGINT, signal.SIGHUP, signal.SIGTERM):
         signal.signal(sig, signal.SIG_IGN)
+    if temp_dir:
+        # Temp-Dateien (HEIC für sips, Arbeitsordner von textutil) im Ordner des Laufs: den räumt der Hauptprozess
+        # am Ende weg – auch wenn dieser Prozess hart beendet wurde (Zeitlimit, Absturz, Ctrl+C)
+        import tempfile
+        tempfile.tempdir = temp_dir
+        os.environ["TMPDIR"] = temp_dir
     from .ocr import make_engine
     _WORKER_ENGINE = make_engine(engine_name)
 
@@ -871,12 +907,26 @@ def _start_resource_tracker() -> None:
         signal.signal(signal.SIGHUP, old)
 
 
-def _make_pool(engine_name: str, workers: int):
-    import multiprocessing as mp
+class _HardStopProcess(SpawnProcess):
+    """Arbeitsprozess, den der Pool mit SIGKILL statt SIGTERM beendet.
+
+    Die Arbeitsprozesse ignorieren SIGTERM (Abmelden soll nicht als Absturz zählen). Stürzt einer ab, beendet
+    concurrent.futures die übrigen aber mit terminate() und wartet dann – mit gesperrtem Pool – auf ihr Ende.
+    Mit SIGTERM käme das nie: der Hauptprozess hinge beim Einreihen der nächsten Datei für immer."""
+
+    def terminate(self):
+        self.kill()
+
+
+class _HardStopContext(SpawnContext):
+    Process = _HardStopProcess
+
+
+def _make_pool(engine_name: str, workers: int, temp_dir: str | None = None):
     from concurrent.futures import ProcessPoolExecutor
     _start_resource_tracker()
-    return ProcessPoolExecutor(workers, mp_context=mp.get_context("spawn"),
-                               initializer=_init_worker, initargs=(engine_name,),
+    return ProcessPoolExecutor(workers, mp_context=_HardStopContext(),
+                               initializer=_init_worker, initargs=(engine_name, temp_dir),
                                max_tasks_per_child=MAX_TASKS_PER_WORKER)
 
 
@@ -892,7 +942,8 @@ def _kill_pool(pool) -> None:
 def _process_parallel(con, todo, engine_name: str, workers: int, prog: _Progress) -> None:
     import shutil
     import tempfile
-    # Markierungsdateien für Zeitüberschreitungen: im System-Temp-Ordner, nie neben den Originalen
+    # Markierungsdateien für Zeitüberschreitungen und Temp-Dateien der Arbeitsprozesse: in einem eigenen Ordner
+    # im System-Temp, nie neben den Originalen; er wird am Ende des Laufs ganz entfernt
     marker_dir = tempfile.mkdtemp(prefix="belegsuche-")
     try:
         _process_parallel_run(con, todo, engine_name, workers, prog, marker_dir)
@@ -907,18 +958,31 @@ def _process_parallel_run(con, todo, engine_name: str, workers: int, prog: _Prog
 
     queue = deque(todo)
     solo: deque = deque()      # nach einem Absturz: einzeln verarbeiten, damit nur die schuldige Datei zählt
-    deferred: list = []        # gleicher Inhalt ist gerade in Arbeit -> danach übernehmen
-    inflight: dict = {}        # future -> (row, stat, sha, t0)
+    # gleicher Inhalt (Datei oder Mail-Anhang) ist gerade in Arbeit -> warten und danach übernehmen statt erneut
+    # erkennen: sha256 -> wartende Dateien
+    waiting: dict[str, list] = {}
+    inflight: dict = {}        # future -> (row, stat, sha, t0, sha256 der Datei und ihrer noch unbekannten Anhänge)
     inflight_sha: set[str] = set()
     current = None             # Datei, die der Hauptprozess gerade vorbereitet
     crashed: list = []
-    pool = _make_pool(engine_name, workers)
+    pool = _make_pool(engine_name, workers, marker_dir)
     solo_running = False
+    broken_at_submit, broken_from_solo = None, False   # Datei, deren Einreihen der Absturz eines Prozesses verhinderte
 
     def marker(r) -> str:
         return os.path.join(marker_dir, f"{r['id']}.zeitlimit")
+
+    def release(shas) -> None:
+        """Dateien, die auf diesen Inhalt gewartet haben, wieder vorn einreihen."""
+        for x in shas:
+            for w in reversed(waiting.pop(x, [])):
+                queue.appendleft(w)
+
+    def release_all() -> None:
+        release(list(waiting))
     try:
-        while queue or solo or inflight or deferred:
+        while queue or solo or inflight or waiting:
+            broken_at_submit = None
             while not solo_running and ((solo and not inflight) or (queue and not solo and len(inflight) < workers * 2)):
                 from_solo = bool(solo)
                 r = solo.popleft() if from_solo else queue.popleft()
@@ -926,7 +990,7 @@ def _process_parallel_run(con, todo, engine_name: str, workers: int, prog: _Prog
                     raise _RootLost(r["root"])
                 current, t0 = r, time.time()
                 try:
-                    s, sha, res, reused, known = _prepare(con, r)
+                    s, sha, res, reused, known, pending = _prepare(con, r)
                     if res is not None:
                         prog.finish(r, s, sha, res, reused, t0)
                         current = None
@@ -935,46 +999,66 @@ def _process_parallel_run(con, todo, engine_name: str, workers: int, prog: _Prog
                     prog.fail(r, e)
                     current = None
                     continue
-                if sha in inflight_sha:
+                # Rückfall „nur Mailtext“ liest keine PDF-/Bild-Anhänge: dann wartet die Mail auf nichts davon
+                blockers = {sha} if _safe_mode(r) else {sha, *pending}
+                busy = blockers & inflight_sha
+                if busy:
                     prog.back_to_pending(r)
                     current = None
-                    deferred.append(r)
+                    waiting.setdefault(min(busy), []).append(r)
                     continue
-                fut = pool.submit(_extract_job, os.path.join(r["root"], r["relpath"]), marker(r), STALL_TIMEOUT,
-                                  known, _safe_mode(r), r["root"])
-                inflight[fut] = (r, s, sha, t0)
+                try:
+                    fut = pool.submit(_extract_job, os.path.join(r["root"], r["relpath"]), marker(r), STALL_TIMEOUT,
+                                      known, _safe_mode(r), r["root"])
+                except BrokenProcessPool:
+                    # Ein Arbeitsprozess ist abgestürzt, während diese Datei vorbereitet wurde
+                    broken_at_submit, broken_from_solo = r, from_solo
+                    current = None
+                    break
+                inflight[fut] = (r, s, sha, t0, blockers)
                 current = None
-                inflight_sha.add(sha)
+                inflight_sha.update(blockers)
                 solo_running = from_solo
-            if not inflight:
-                if deferred:
-                    queue.extendleft(reversed(deferred))
-                    deferred = []
+            if broken_at_submit is not None and inflight:
+                # Die Datei ist nicht schuld (sie lief noch gar nicht): ohne Versuch zurück, die Absturzfolgen zeigen
+                # die laufenden Dateien (ihre Ergebnisse melden den kaputten Pool)
+                prog.back_to_pending(broken_at_submit)
+                (solo if broken_from_solo else queue).appendleft(broken_at_submit)
+                broken_at_submit = None
+            if not inflight and broken_at_submit is None:
+                if waiting:
+                    release_all()
                     continue
                 if not queue and not solo:
                     break
                 continue
-            done, _ = wait(list(inflight), return_when=FIRST_COMPLETED)
-            if not inflight.keys() - done:
-                solo_running = False
             crashed = []
-            for fut in done:
-                current = inflight[fut][0]   # vor dem pop festhalten: Abbruch kann jederzeit eintreffen
-                r, s, sha, t0 = inflight.pop(fut)
-                inflight_sha.discard(sha)
-                try:
-                    prog.finish(r, s, sha, fut.result(), False, t0)
-                except BrokenProcessPool:
-                    crashed.append(r)
-                except Exception as e:
-                    prog.fail(r, e)
-                current = None
+            if inflight:
+                done, _ = wait(list(inflight), return_when=FIRST_COMPLETED)
+                if not inflight.keys() - done:
+                    solo_running = False
+                for fut in done:
+                    current = inflight[fut][0]   # vor dem pop festhalten: Abbruch kann jederzeit eintreffen
+                    r, s, sha, t0, blockers = inflight.pop(fut)
+                    inflight_sha.difference_update(blockers)
+                    try:
+                        prog.finish(r, s, sha, fut.result(), False, t0)
+                    except BrokenProcessPool:
+                        crashed.append(r)
+                    except Exception as e:
+                        prog.fail(r, e)
+                    current = None
+                    release(blockers)
+            else:
+                # Pool brach ohne laufende Datei (Prozess im Leerlauf beendet): diese Datei zählt den Versuch
+                crashed, broken_at_submit = [broken_at_submit], None
             if crashed:
                 # Ein Prozess ist abgestürzt: alle laufenden Dateien sind betroffen
-                for fut, (r, s, sha, t0) in list(inflight.items()):
+                for fut, (r, s, sha, t0, _b) in list(inflight.items()):
                     crashed.append(r)
                 inflight.clear()
                 inflight_sha.clear()
+                release_all()
                 solo_running = False
                 _kill_pool(pool)
                 if any(_root_gone(r["root"]) for r in crashed):
@@ -996,7 +1080,7 @@ def _process_parallel_run(con, todo, engine_name: str, workers: int, prog: _Prog
                         prog.back_to_pending(r)
                         queue.appendleft(r)
                     crashed = []
-                    pool = _make_pool(engine_name, workers)
+                    pool = _make_pool(engine_name, workers, marker_dir)
                     continue
                 for r in crashed:
                     att = con.execute("SELECT attempts FROM files WHERE id=?", (r["id"],)).fetchone()[0]
@@ -1008,10 +1092,10 @@ def _process_parallel_run(con, todo, engine_name: str, workers: int, prog: _Prog
                         solo.append(dict(r) | {"attempts": att})
                 crashed = []
                 prog.log(f"   Ein Verarbeitungsprozess ist abgestürzt – {len(solo)} Datei(en) werden einzeln wiederholt.")
-                pool = _make_pool(engine_name, workers)
+                pool = _make_pool(engine_name, workers, marker_dir)
     except (KeyboardInterrupt, _RootLost) as e:
         # nur Dateien, die noch 'processing' sind, gehen zurück (back_to_pending prüft das)
-        for r in [current, *(v[0] for v in inflight.values()), *crashed]:
+        for r in [current, broken_at_submit, *(v[0] for v in inflight.values()), *crashed]:
             if r is not None:
                 prog.back_to_pending(r)
         _kill_pool(pool)
@@ -1084,6 +1168,17 @@ def prune_renamed(con, root_id: int, root_path: str, log: Callable[[str], None] 
     return removed
 
 
+def check_temp_outside(roots) -> None:
+    """Temp-Dateien (Zeitlimit-Markierungen, HEIC für sips, Arbeitsordner von textutil) dürfen nie in einem
+    eingelesenen Ordner landen: liegt TMPDIR darin, wird nicht eingelesen."""
+    import tempfile
+    tmp = tempfile.gettempdir()
+    for root in roots:
+        if dbm.path_inside(tmp, root):
+            raise SystemExit(f"Der Temp-Ordner ({tmp}) liegt im eingelesenen Ordner {root} – dort wird nichts "
+                             "geschrieben. TMPDIR auf einen anderen Ordner setzen.")
+
+
 def run_index(con, folders: list[str], engine_name: str = "apple", confirm_missing: bool = False,
               limit: int | None = None, log: Callable[[str], None] = print, engine=None, workers: int = 1,
               retry: bool = False):
@@ -1095,6 +1190,7 @@ def run_index(con, folders: list[str], engine_name: str = "apple", confirm_missi
     roots = con.execute("SELECT id, path FROM roots ORDER BY id").fetchall()
     if folders:
         roots = [r for r in roots if r["id"] in ids]
+    check_temp_outside(r["path"] for r in roots)
     scans = [scan_root(con, r["id"], r["path"], confirm_missing, log) for r in roots]
     for s in scans:
         if s.online:

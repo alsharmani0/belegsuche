@@ -91,19 +91,22 @@ def _part_labels(con, file_id: int):
 
 def _attachment_stats(con) -> dict | None:
     """Mail-Anhänge fertig eingelesener Mails: ausgewertet, übernommen (gleicher Inhalt schon eingelesen),
-    DOMUS-Platzhalter und nicht ausgewertet (Logos zählen nicht, winmail.dat, Excel, zu groß …)."""
+    DOMUS-Platzhalter, doppelt in derselben Mail und nicht ausgewertet (Logos zählen nicht, winmail.dat, Excel,
+    zu groß …)."""
     if not dbm.has_table(con, "parts"):
         return None
-    from .mail import REUSED_NOTE
+    from .mail import DUPLICATE_NOTE, REUSED_NOTE
+    dup = DUPLICATE_NOTE + " %"
     row = con.execute(
         "SELECT count(*) AS n,"
-        " coalesce(sum(t.n_pages > 0 AND coalesce(t.note, '') != ?), 0) AS evaluated,"
-        " coalesce(sum(t.n_pages > 0 AND t.note = ?), 0) AS reused,"
+        " coalesce(sum(t.n_pages > 0 AND coalesce(t.note, '') NOT LIKE ? || '%'), 0) AS evaluated,"
+        " coalesce(sum(t.n_pages > 0 AND t.note LIKE ? || '%'), 0) AS reused,"
         " coalesce(sum(t.kind = 'link'), 0) AS links,"
-        " coalesce(sum(t.kind != 'link' AND t.n_pages = 0), 0) AS skipped"
+        " coalesce(sum(t.kind != 'link' AND t.n_pages = 0 AND coalesce(t.note, '') LIKE ?), 0) AS duplicates,"
+        " coalesce(sum(t.kind != 'link' AND t.n_pages = 0 AND coalesce(t.note, '') NOT LIKE ?), 0) AS skipped"
         " FROM parts t JOIN files f ON f.id = t.file_id WHERE t.part_no > 0 AND f.status = 'done'",
-        (REUSED_NOTE, REUSED_NOTE)).fetchone()
-    return {k: row[k] for k in ("n", "evaluated", "reused", "links", "skipped")}
+        (REUSED_NOTE, REUSED_NOTE, dup, dup)).fetchone()
+    return {k: row[k] for k in ("n", "evaluated", "reused", "links", "duplicates", "skipped")}
 
 
 def build_report(con) -> dict:
@@ -231,7 +234,8 @@ def format_report(r: dict, max_problems: int = 25) -> str:
     att = r.get("attachments")
     if att and att["n"]:
         lines += ["", f"Mail-Anhänge: {att['evaluated']} ausgewertet, {att['reused']} übernommen (gleicher Inhalt), "
-                      f"{att['links']} Platzhalter (in DOMUS abgelegt), {att['skipped']} nicht ausgewertet"]
+                      f"{att['links']} Platzhalter (in DOMUS abgelegt), {att['skipped']} nicht ausgewertet"
+                      + (f", {att['duplicates']} doppelt in derselben Mail" if att.get("duplicates") else "")]
     if r.get("broken_names"):
         names = r["broken_name_list"]
         lines += ["", f"Dateinamen mit beschädigten Umlauten: {r['broken_names']}  (beim Kopieren falsch übertragen? "

@@ -137,6 +137,7 @@ def cmd_index(args) -> int:
                 retryable = con.execute(
                     "SELECT count(*) FROM files WHERE status='error' AND coalesce(error,'') NOT LIKE 'PDF beschädigt%'"
                     " AND coalesce(error,'') NOT LIKE 'Word-Datei beschädigt%'"
+                    " AND coalesce(error,'') NOT LIKE 'Word-Datei nicht lesbar%'"
                     f" AND coalesce(error,'') NOT IN ({','.join('?' for _ in PERMANENT_ERRORS)})",
                     PERMANENT_ERRORS).fetchone()[0]
         except KeyboardInterrupt:
@@ -183,6 +184,11 @@ def cmd_search(args) -> int:
             if h.part_no:
                 print(f"    Anhang {h.part_no}: {_safe(h.part_name or '(ohne Namen)')}, "
                       f"Seite {h.part_page}/{h.part_pages}")
+            for link in h.links[:5]:
+                where = os.path.join(h.root, link["path"]) if link["path"] else "(nicht im Vorgangsordner)"
+                print(f"    In DOMUS abgelegt: {_safe(link['name'] or '(ohne Namen)')} → {_safe(where)}")
+            if len(h.links) > 5:
+                print(f"    … und {len(h.links) - 5} weitere Anhänge in DOMUS")
         print(f"    {_safe(h.snippet_text)}")
         if h.missing:
             print(f"    nicht enthalten: {_safe(', '.join(h.missing))}")

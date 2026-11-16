@@ -7,6 +7,10 @@
 - Die Art steht an den ersten Bytes, nicht an der Endung (manche .doc sind in Wahrheit .docx).
 - Seiten: an Seitenumbrüchen (\\f) geteilt, sonst eine Seite. Bilder in Word-Dateien werden nicht per
   Texterkennung gelesen (fast immer Briefkopf-Logos); hat die Datei fast keinen Text, steht ein Hinweis da.
+- Auch als .doc gespeichert, aber eigentlich: Strict-OOXML (anderer Namensraum), Word-2003-XML (WordML), HTML
+  (ohne Netzzugriff über mail.html_to_text) und reiner Text.
+- textutil gibt bei alten .doc die Feldbefehle mit aus („SYMBOL 215 \\f "Symbol"“, „TIME \\@ "dd. MMMM yyyy"“,
+  „MERGEFIELD Name“); sie werden entfernt, das Feldergebnis bleibt.
 """
 from __future__ import annotations
 
@@ -27,7 +31,11 @@ MAX_WORD_BYTES = 200 * 1024 * 1024     # größere Word-Dateien werden nicht gel
 MAX_XML_BYTES = 64 * 1024 * 1024       # je XML-Datei im docx (entpackt) – Schutz vor ZIP-Bomben
 PASSWORD_MSG = "Word-Datei ist passwortgeschützt"
 
-_W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+_W_NS = b"http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_W = "{" + _W_NS.decode() + "}"
+# gleiche Elemente unter anderem Namensraum: Strict-OOXML (ISO 29500) und Word-2003-XML (WordML)
+_W_OTHER_NS = (b"http://purl.oclc.org/ooxml/wordprocessingml/main",
+               b"http://schemas.microsoft.com/office/word/2003/wordml")
 _FALLBACK = "{http://schemas.openxmlformats.org/markup-compatibility/2006}Fallback"
 _P, _T, _TAB, _BR, _CR = _W + "p", _W + "t", _W + "tab", _W + "br", _W + "cr"
 _TC, _TR = _W + "tc", _W + "tr"
@@ -46,6 +54,8 @@ def _xml_text(data: bytes) -> str:
     Text von Textfeldern doppelt da."""
     if b"<!DOCTYPE" in data or b"<!ENTITY" in data:
         raise ExtractError("Word-Datei nicht lesbar (ungewöhnlicher XML-Inhalt)")
+    for ns in _W_OTHER_NS:
+        data = data.replace(ns, _W_NS)
     try:
         root = ET.fromstring(data)
     except ET.ParseError as e:
@@ -122,6 +132,24 @@ def _docx_text(z: zipfile.ZipFile, notes: list[str]) -> list[str]:
     return pages
 
 
+_FIELD_RE = re.compile(
+    r'SYMBOL \d+(?: \\[fshu](?: "[^"\n]{0,40}"| \d+)?)*'
+    r'|(?:TIME|DATE|CREATEDATE|SAVEDATE|PRINTDATE) \\@ "[^"\n]{0,40}"(?: \\\* \w+)*'
+    r'|MERGEFIELD "?[^\s"\\]{1,60}"?(?: \\[*bfm](?: "[^"\n]{0,40}"| \w+)?)*'
+    r'|(?:INCLUDEPICTURE|HYPERLINK) "[^"\n]{0,300}"(?: \\[*dlo](?: \w+)?)*'
+    r'|EMBED [\w.]{1,60}(?: \\\* \w+)?'
+    r'|\\\* (?:MERGEFORMAT|MERGEFORMATINET|CHARFORMAT)\b'
+    r'|\b(?:FORMTEXT|FORMCHECKBOX|FORMDROPDOWN)\b')
+
+
+def strip_field_codes(text: str) -> str:
+    """Feldbefehle, die textutil aus alten .doc mit ausgibt, entfernen (das Ergebnis des Felds steht dahinter)."""
+    if not any(k in text for k in ("SYMBOL ", "TIME ", "DATE ", "MERGEFIELD ", "FORM", "EMBED ", "INCLUDEPICTURE ",
+                                   "HYPERLINK ", "MERGEFORMAT")):
+        return text
+    return re.sub(r"[ \t]{2,}", " ", _FIELD_RE.sub(" ", text))
+
+
 def _textutil(data: bytes, fmt: str) -> str:
     """Text über macOS textutil – nur über stdin/stdout, nie mit dem Pfad des Originals."""
     try:
@@ -138,7 +166,7 @@ def _textutil(data: bytes, fmt: str) -> str:
     # textutil meldet Lesefehler nur auf stderr und endet trotzdem mit 0
     if proc.returncode != 0 or (not text.strip() and err):
         raise ExtractError("Word-Datei beschädigt oder nicht lesbar" + (f" (textutil: {err[:200]})" if err else ""))
-    return text
+    return strip_field_codes(text)
 
 
 def _is_encrypted_ole(data: bytes) -> bool:
@@ -199,7 +227,41 @@ def word_text(data: bytes, notes: list[str]) -> list[str]:
         return _textutil(data, "doc").split("\f")
     if kind == "rtf":
         return _textutil(data, "rtf").split("\f")
+    if kind is None and (text := _disguised_text(data)) is not None:
+        return text.split("\f")
     raise ExtractError("Word-Datei nicht lesbar (unbekanntes Format)")
+
+
+def _decode_text(data: bytes) -> str:
+    for bom, enc in ((b"\xef\xbb\xbf", "utf-8"), (b"\xff\xfe", "utf-16-le"), (b"\xfe\xff", "utf-16-be")):
+        if data.startswith(bom):
+            return data[len(bom):].decode(enc, errors="replace")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("cp1252", errors="replace")
+
+
+def _disguised_text(data: bytes) -> str | None:
+    """.doc, das in Wahrheit Word-2003-XML, HTML (Word „Als Webseite speichern“) oder reiner Text ist. HTML ohne
+    textutil (das lüde Bilder und Stile aus dem Netz nach). None: keines davon."""
+    head = data[:4096]
+    utf16 = head.startswith((b"\xff\xfe", b"\xfe\xff"))
+    if (not utf16 and b"\x00" in head) or not head.strip():
+        return None                                  # binär: kein Text
+    text = _decode_text(data)
+    start = text.lstrip()[:2048].lower()
+    if start.startswith("<?xml") and ("schemas.microsoft.com/office/word/2003/wordml" in text[:8192]
+                                      or "wordprocessingml" in text[:8192]):
+        return _xml_text(text.encode("utf-8").replace(b'encoding="UTF-16"', b'encoding="UTF-8"')
+                         .replace(b"encoding='UTF-16'", b"encoding='UTF-8'"))
+    if start.startswith(("<!doctype html", "<html")) or "<html" in start[:512]:
+        from .mail import html_to_text
+        return html_to_text(text)
+    printable = sum(1 for c in text[:4096] if c.isprintable() or c in "\n\r\t\f")
+    if printable >= 0.95 * len(text[:4096]):
+        return text
+    return None
 
 
 def word_pages(data: bytes, notes: list[str]) -> list[PageText]:

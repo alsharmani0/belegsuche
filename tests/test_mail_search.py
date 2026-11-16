@@ -160,7 +160,7 @@ def test_report_counts_mails_word_and_attachments(tmp_path, capsys):
     db, con = index(tmp_path, root)
     r = build_report(con)
     assert r["mails"] == 1 and r["words"] == 1 and r["unsupported"] == {".xlsx": 1}
-    assert r["attachments"] == {"n": 4, "evaluated": 1, "reused": 1, "links": 1, "skipped": 1}
+    assert r["attachments"] == {"n": 4, "evaluated": 1, "reused": 1, "links": 1, "duplicates": 0, "skipped": 1}
     text = format_report(r)
     assert "E-Mails: 1, Word: 1" in text
     assert ("Mail-Anhänge: 1 ausgewertet, 1 übernommen (gleicher Inhalt), 1 Platzhalter (in DOMUS abgelegt), "

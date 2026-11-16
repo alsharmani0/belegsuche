@@ -6,6 +6,7 @@ import io
 import os
 import socket
 import tempfile
+from datetime import datetime
 from email import policy
 from email.message import EmailMessage
 from pathlib import Path
@@ -224,7 +225,9 @@ def test_missing_date_uses_file_time_and_draft_is_marked(tmp_path):
     res = extract_full(p, None)
     assert "(Änderungsdatum der Datei – Mail ohne Datum)" in res.pages[0].text
     assert "Entwurf (nicht gesendet)" in res.pages[0].text
-    assert res.mail.sent_at.startswith("2023-11-")
+    shown = datetime.fromtimestamp(1_700_000_000).strftime("%d.%m.%Y")
+    assert shown in res.pages[0].text                   # nur angezeigt: kein Sendedatum (siehe test_mail_review)
+    assert res.mail.sent_at is None
 
 
 def test_empty_and_non_mime_eml(tmp_path):

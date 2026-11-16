@@ -2,9 +2,14 @@
 
 E-Mails: „Mail öffnen“ öffnet die .eml mit Apple Mail. „Anhang öffnen“ liest die Mail neu (nur lesend), sucht den
 Teil über parts.mime_path, prüft die sha256 und schreibt ihn schreibgeschützt in einen eigenen Ordner im
-System-Temp (nie neben die Mail, nie in einen eingelesenen Ordner). /datei/<id>/teil/<n> liefert PDF- und
-Bild-Anhänge direkt aus dem Speicher (für „Seite Y im Browser“). Mails, Word-Dateien und alle Typen außerhalb
-einer kleinen Liste gehen nur als Download mit CSP sandbox hinaus, nie als Seite im Ursprung der Oberfläche.
+System-Temp (nie neben die Mail, nie in einen eingelesenen Ordner). Die Kopie trägt die Quarantäne-Markierung
+von macOS wie ein Anhang aus Apple Mail (Word öffnet sie in der geschützten Ansicht). Ein DOMUS-Platzhalter
+öffnet die Datei, auf die er verweist. /datei/<id>/teil/<n> liefert PDF- und Bild-Anhänge direkt aus dem
+Speicher (für „Seite Y im Browser“). Mails, Word-Dateien und alle Typen außerhalb einer kleinen Liste gehen nur
+als Download mit CSP sandbox hinaus, nie als Seite im Ursprung der Oberfläche.
+
+Word-Dateien öffnen ebenfalls als schreibgeschützte Kopie im System-Temp: Word legt sonst eine Sperrdatei (~$…)
+neben das Original im eingelesenen Ordner und erlaubt Speichern ins Original. „Im Finder zeigen“ zeigt das Original.
 """
 from __future__ import annotations
 
@@ -15,6 +20,7 @@ import mimetypes
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -69,6 +75,8 @@ ATTACH_MAX_AGE = 24 * 3600            # ältere Reste im Temp-Ordner räumt der 
 MAX_NAME_CHARS = 100
 MAIL_APP = "com.apple.mail"
 MAIL_CHANGED = "Mail geändert – neu einlesen"
+QUARANTINE_ATTR = b"com.apple.quarantine"
+MAX_COPY_BYTES = 200 * 1024 * 1024    # Word-Dateien größer als das werden nicht kopiert (word.MAX_WORD_BYTES)
 
 
 def _file_row(db_path: Path, file_id: int):
@@ -137,25 +145,23 @@ def _content_disposition(kind: str, name: str) -> str:
     return f"{kind}; filename=\"{plain}\"; filename*=UTF-8''{quote(name, safe='')}"
 
 
-def _inside(path: str, root: str) -> bool:
-    """Liegt path in root (oder ist root)? Ohne Symlinks, auch bei anderer Groß-/Kleinschreibung."""
-    rp, rr = os.path.realpath(path), os.path.realpath(root)
-    for a, b in ((rp, rr), (rp.casefold(), rr.casefold())):
-        if a == b or a.startswith(b.rstrip("/") + "/"):
-            return True
-    if os.path.isdir(rr):
-        p = rp
-        while True:
-            try:
-                if os.path.exists(p) and os.path.samefile(p, rr):
-                    return True
-            except OSError:
-                pass
-            parent = os.path.dirname(p)
-            if parent == p:
-                break
-            p = parent
-    return False
+_inside = dbm.path_inside
+
+
+def set_quarantine(fd: int) -> bool:
+    """Datei als „aus dem Internet geladen“ markieren (com.apple.quarantine), wie es Apple Mail mit Anhängen tut:
+    Word öffnet sie dann in der geschützten Ansicht, Makros bleiben aus. False, wenn macOS das nicht erlaubt."""
+    import ctypes
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        fsetxattr = libc.fsetxattr
+    except (OSError, AttributeError):
+        return False
+    fsetxattr.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32,
+                          ctypes.c_int]
+    fsetxattr.restype = ctypes.c_int
+    value = f"0081;{int(time.time()):08x};Belegsuche;".encode("ascii")
+    return fsetxattr(fd, QUARANTINE_ATTR, value, len(value), 0, 0) == 0
 
 
 class TempRefused(Exception):
@@ -170,7 +176,8 @@ class AttachmentTemp:
         self._dirs: list[str] = []
         self._lock = threading.Lock()
 
-    def write(self, name: str, data: bytes, roots: list[str]) -> str:
+    def write(self, name: str, data: bytes, roots: list[str], quarantine: bool = True) -> str:
+        """Kopie anlegen. quarantine: als heruntergeladen markieren (Mail-Anhänge, Inhalt von außen)."""
         base = tempfile.gettempdir()
         for r in roots:
             if _inside(base, r):
@@ -186,6 +193,9 @@ class AttachmentTemp:
         fd = os.open(path, WRITE_FLAGS, 0o600)
         with os.fdopen(fd, "wb") as f:
             f.write(data)
+            f.flush()
+            if quarantine:
+                set_quarantine(f.fileno())
         os.chmod(path, 0o400)
         return path
 
@@ -284,6 +294,48 @@ def _read_part(db_path: Path, file_id: int, part_no: int) -> tuple[bytes, str, s
     if kind is None:
         raise PartError(415, "Anhänge dieser Art werden nicht geöffnet")
     return data, kind, safe_filename(row["name"], PART_EXT[kind]), roots
+
+
+def _link_target(db_path: Path, file_id: int, part_no: int) -> int | None:
+    """DOMUS-Platzhalter part_no der Mail file_id: id der verlinkten Datei im Index. None, wenn der Teil kein
+    Platzhalter ist; PartError, wenn die Datei nicht (mehr) im Vorgangsordner bzw. im Index ist."""
+    con = dbm.connect(db_path, readonly=True)
+    try:
+        if not dbm.has_table(con, "parts"):
+            return None
+        row = con.execute("SELECT t.kind, t.note, f.root_id FROM parts t JOIN files f ON f.id = t.file_id"
+                          " WHERE t.file_id = ? AND t.part_no = ? AND f.kind = 'mail'", (file_id, part_no)).fetchone()
+        if row is None or row["kind"] != "link":
+            return None
+        target = dbm.linked_file_id(con, row["root_id"], row["note"]) if row["note"] else None
+    finally:
+        con.close()
+    if target is None:
+        raise PartError(404, "Die in DOMUS abgelegte Datei liegt nicht im Vorgangsordner (oder ist nicht eingelesen)")
+    return target
+
+
+def _read_original(path: str, limit: int) -> bytes:
+    """Inhalt eines Originals (ohne Symlinks, nur normale Datei, höchstens limit Bytes) – nur lesend."""
+    try:
+        fd = os.open(path, OPEN_FLAGS)
+    except OSError:
+        raise PartError(404, "Datei nicht lesbar (verschoben oder ersetzt?) – neu einlesen") from None
+    with os.fdopen(fd, "rb") as f:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise PartError(404, "Keine normale Datei")
+        if st.st_size > limit:
+            raise PartError(413, "Datei zu groß für eine Kopie – im Finder zeigen und von Hand öffnen")
+        return f.read(limit + 1)
+
+
+def _roots(db_path: Path) -> list[str]:
+    con = dbm.connect(db_path, readonly=True)
+    try:
+        return [r[0] for r in con.execute("SELECT path FROM roots")]
+    finally:
+        con.close()
 
 
 def make_handler(searcher: Searcher, port: int, attachments: AttachmentTemp | None = None):
@@ -399,6 +451,7 @@ def make_handler(searcher: Searcher, port: int, attachments: AttachmentTemp | No
                         "outdated": h.outdated, "kind": h.kind, "part_no": h.part_no, "part_name": h.part_name,
                         "part_kind": h.part_kind, "part_page": h.part_page, "part_pages": h.part_pages,
                         "mail_subject": h.mail_subject, "mail_from": h.mail_from, "mail_date": h.mail_date,
+                        "links": h.links,
                     } for h in resp.hits]})
             elif url.path == "/api/status":
                 con = dbm.connect(searcher.db_path, readonly=True)
@@ -419,6 +472,16 @@ def make_handler(searcher: Searcher, port: int, attachments: AttachmentTemp | No
                 if not m or int(m.group(1)) < 1 or (m.group(2) is not None and not _valid_part(int(m.group(2)))):
                     return self._json({"error": "bad id"}, 400)
                 if m.group(2) is not None:
+                    try:
+                        target = _link_target(searcher.db_path, int(m.group(1)), int(m.group(2)))
+                    except PartError as e:
+                        return self._json({"error": e.msg}, e.status)
+                    if target is not None:             # Platzhalter: zur verlinkten Datei
+                        self.send_response(303)
+                        self.send_header("Location", f"/datei/{target}")
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return
                     return self._send_part(int(m.group(1)), int(m.group(2)))
                 fid = int(m.group(1))
                 path, err = _resolve(searcher.db_path, fid)
@@ -471,17 +534,30 @@ def make_handler(searcher: Searcher, port: int, attachments: AttachmentTemp | No
                 data, _, name, roots = _read_part(searcher.db_path, file_id, part_no)
             except PartError as e:
                 return self._json({"error": e.msg}, e.status)
+            return self._open_copy(name, data, roots, quarantine=True)
+
+        def _open_copy(self, name: str, data: bytes, roots: list[str], quarantine: bool):
+            """Schreibgeschützte Kopie im System-Temp anlegen und mit dem Standardprogramm öffnen."""
             try:
-                path = temp.write(name, data, roots)
+                path = temp.write(name, data, roots, quarantine=quarantine)
             except TempRefused:
-                return self._json({"error": "Temp-Ordner liegt in einem eingelesenen Ordner – Anhang nicht "
+                return self._json({"error": "Temp-Ordner liegt in einem eingelesenen Ordner – Datei nicht "
                                             "geöffnet (TMPDIR prüfen)"}, 500)
             except OSError as e:
-                return self._json({"error": f"Anhang konnte nicht bereitgestellt werden ({e.strerror or e})"}, 500)
+                return self._json({"error": f"Kopie konnte nicht bereitgestellt werden ({e.strerror or e})"}, 500)
             code = _returncode(subprocess.run(["open", path], check=False))
             if code:
                 return self._json({"error": f"Öffnen fehlgeschlagen (Programm meldet Fehler {code})"}, 500)
             self._json({"ok": True})
+
+        def _open_word(self, path: str):
+            """Word-Original als schreibgeschützte Kopie öffnen (keine Sperrdatei, kein Speichern ins Original)."""
+            try:
+                data = _read_original(path, MAX_COPY_BYTES)
+            except PartError as e:
+                return self._json({"error": e.msg}, e.status)
+            return self._open_copy(_clean_name(os.path.basename(path)) or "Dokument", data,
+                                   _roots(searcher.db_path), quarantine=False)
 
         def _post(self, url):
             if self.headers.get("X-Belegsuche") != "1":
@@ -501,14 +577,25 @@ def make_handler(searcher: Searcher, port: int, attachments: AttachmentTemp | No
             if part is not None and not _valid_part(part):
                 return self._json({"error": "bad request"}, 400)
             reveal = data.get("reveal") is True
+            fid = data["id"]
+            if part is not None:
+                try:
+                    target = _link_target(searcher.db_path, fid, part)
+                except PartError as e:
+                    return self._json({"error": e.msg}, e.status)
+                if target is not None:                   # Platzhalter: die verlinkte Datei öffnen bzw. zeigen
+                    fid, part = target, None
             if part is not None and not reveal:
-                return self._open_part(data["id"], part)
-            path, err = _resolve(searcher.db_path, data["id"])
+                return self._open_part(fid, part)
+            path, err = _resolve(searcher.db_path, fid)
             if err:
                 return self._json({"error": err}, 404)
+            kind = _file_kind(searcher.db_path, fid)
             if reveal:                                   # bei Mails und Anhängen: die .eml im Finder
                 code = _returncode(subprocess.run(["open", "-R", path], check=False))
-            elif _file_kind(searcher.db_path, data["id"]) == "mail":
+            elif kind == "word":
+                return self._open_word(path)
+            elif kind == "mail":
                 # mit Apple Mail; geht das nicht (z. B. Mail fehlt), mit dem Standardprogramm für .eml
                 code = _returncode(subprocess.run(["open", "-b", MAIL_APP, path], check=False))
                 if code:
@@ -548,6 +635,7 @@ def serve(db_path: Path, port: int = 8765, open_browser: bool = True) -> int:
         return 1
     browser_timer = None
     attachments = AttachmentTemp()
+    old_handlers = _stop_on_hangup()
     try:
         try:
             AttachmentTemp.cleanup_stale()          # Anhang-Kopien früherer Läufe (älter als 24 h)
@@ -565,8 +653,26 @@ def serve(db_path: Path, port: int = 8765, open_browser: bool = True) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        for sig, handler in old_handlers.items():
+            signal.signal(sig, handler)
         if browser_timer is not None:
             browser_timer.cancel()
         httpd.server_close()
         attachments.cleanup()                   # geöffnete Anhänge (Temp-Kopien) wegräumen
     return 0
+
+
+def _raise_interrupt(signum, frame):
+    raise KeyboardInterrupt
+
+
+def _stop_on_hangup() -> dict:
+    """Terminal-Fenster geschlossen (SIGHUP) oder Abmelden (SIGTERM): wie Ctrl+C beenden, damit die Kopien
+    geöffneter Anhänge (persönliche Daten) weggeräumt werden. Nur im Hauptthread möglich."""
+    old = {}
+    for sig in (signal.SIGHUP, signal.SIGTERM):
+        try:
+            old[sig] = signal.signal(sig, _raise_interrupt)
+        except ValueError:                      # nicht im Hauptthread (Tests): nichts ändern
+            break
+    return old

@@ -117,7 +117,10 @@ class Hit:
     part_pages: int | None = None
     mail_subject: str | None = None
     mail_from: str | None = None
-    mail_date: str | None = None      # „12.03.2021 14:05“
+    mail_date: str | None = None      # „12.03.2021 14:05“ (ohne Date-Kopf: „… (Dateidatum)“)
+    # DOMUS-Platzhalter der Mail: [{"part_no", "name", "path" (relativ zum Ordner, None = nicht gefunden),
+    # "file_id" (die Datei im Index, sonst None)}]
+    links: list[dict] = field(default_factory=list)
 
     @property
     def fullpath(self) -> str:
@@ -984,9 +987,9 @@ class Searcher:
         for chunk in range(0, len(pids), 900):
             ids_ = pids[chunk:chunk + 900]
             for r in con.execute(
-                    "SELECT p.id AS pid, p.page_no, p.file_id, f.relpath, f.sha256, f.pages, f.ocr_pages, f.mtime,"
-                    " f.status, f.kind, r.path AS root FROM pages p JOIN files f ON f.id = p.file_id"
-                    " JOIN roots r ON r.id = f.root_id"
+                    "SELECT p.id AS pid, p.page_no, p.file_id, p.source, f.relpath, f.sha256, f.pages, f.ocr_pages,"
+                    " f.mtime, f.status, f.kind, f.root_id, r.path AS root"
+                    " FROM pages p JOIN files f ON f.id = p.file_id JOIN roots r ON r.id = f.root_id"
                     # geänderte Dateien warten auf das Neu-Einlesen: bis dahin mit dem bisherigen Text finden
                     f" WHERE f.status IN {dbm.SEARCHABLE_SQL} AND p.id IN ({','.join('?' * len(ids_))})", ids_):
                 meta[r["pid"]] = r
@@ -1066,7 +1069,9 @@ class Searcher:
                         tf_score += g.importance * 0.5
             tf_scores.append(tf_score)
         max_tf = max(tf_scores, default=0) or 1.0
+        # bei Gleichstand eine Datei vor einer Mail, die sie nur nennt (Platzhalter, Anhangname im Mailkopf)
         ranked = sorted(zip(order, tf_scores), key=lambda x: (-round(x[0][0][0] + 0.002 * x[1] / max_tf, 6),
+                                                                meta[x[0][0][2]]["kind"] == "mail",
                                                                 -(meta[x[0][0][2]]["mtime"] or 0)))
         order = [grp for grp, _ in ranked]
 
@@ -1101,16 +1106,18 @@ class Searcher:
                 file_id=fid, relpath=m["relpath"], root=m["root"], filename=filename, folder=folder,
                 page_no=m["page_no"], pages=m["pages"] or 1, score=round(score, 4), snippet_html=snip_h,
                 snippet_text=snip_t, matched=[g.label for g, w in zip(live, W) if w > 0],
-                missing=[g.label for g, w in zip(live, W) if w == 0], ocr=bool(m["ocr_pages"]),
+                missing=[g.label for g, w in zip(live, W) if w == 0],
+                # Mail: nur die Fundseite zählt (ein Foto im Anhang macht den PDF-Anhang daneben nicht zum Scan)
+                ocr=(m["source"] or "text") != "text" if m["kind"] == "mail" else bool(m["ocr_pages"]),
                 available=available(m), outdated=m["status"] != "done",
                 duplicates=[where(f) for f in grp if f is not main], kind=m["kind"])
             if m["kind"] == "mail":
-                self._add_mail_fields(con, hit, best_part(main))
+                self._add_mail_fields(con, hit, best_part(main), m)
             hits.append(hit)
         return SearchResponse(query, hits, unknown, len(cands), (time.time() - t0) * 1000)
 
     @staticmethod
-    def _add_mail_fields(con, hit: Hit, part: tuple | None) -> None:
+    def _add_mail_fields(con, hit: Hit, part: tuple | None, m) -> None:
         if part is not None:
             first, last, hit.part_no, hit.part_name, hit.part_kind, _ = part
             hit.part_page, hit.part_pages = hit.page_no - first + 1, last - first + 1
@@ -1118,3 +1125,11 @@ class Searcher:
             row = con.execute("SELECT subject, sender, sent_at FROM mails WHERE file_id = ?", (hit.file_id,)).fetchone()
             if row:
                 hit.mail_subject, hit.mail_from, hit.mail_date = row[0], row[1], dbm.german_date(row[2]) or None
+                if row[2] is None and m["mtime"]:
+                    # Mail ohne Date-Kopf: Änderungszeit der Datei, gekennzeichnet
+                    hit.mail_date = time.strftime("%d.%m.%Y %H:%M", time.localtime(m["mtime"])) + " (Dateidatum)"
+        if dbm.has_table(con, "parts"):
+            rows = con.execute("SELECT part_no, name, note FROM parts WHERE file_id = ? AND kind = 'link'"
+                               " ORDER BY part_no", (hit.file_id,)).fetchall()
+            hit.links = [{"part_no": r[0], "name": r[1], "path": r[2],
+                          "file_id": dbm.linked_file_id(con, m["root_id"], r[2]) if r[2] else None} for r in rows]
