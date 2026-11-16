@@ -3,6 +3,44 @@
 Bedienung und Messbefehle stehen in der [README](../README.md). Die früheren Messwerte sind unten
 getrennt aufgeführt: Die beiden alten Fragenlisten sind kein Blindtest für den aktuellen Code.
 
+## Nachbesserung nach der Prüfung der winmail.dat-Unterstützung (16.11.2026)
+
+Zwei Prüfungen (Code/Sicherheit und Probelauf mit echten Daten) ergaben keinen schweren Befund; behoben sind:
+
+- **Umstellung übersah als PDF gelesene `winmail.dat`:** Format 10 suchte „%PDF-“ hinter einem Vorspann vor der
+  TNEF-Kennung; eine kleine `winmail.dat` mit einem PDF vorn wurde als PDF gespeichert (nur dieses PDF, die übrigen
+  Anhänge nie). Die Umstellung 10 → 11 merkt solche Teile jetzt vor; der nächste Lauf liest die Mail neu. Im echten
+  Index gab es keinen solchen Teil.
+- **Umstellung machte Mails „geändert“:** Schon `suche`, `start` und `bericht` stellen den Index um und setzten
+  dabei alle Mails mit `winmail.dat` auf „wird neu eingelesen“. Jetzt merkt erst `belegsuche index` sie vor, nur in
+  den Ordnern, die er einliest; bis dahin gelten sie als fertig, der Bericht nennt sie „noch nicht geöffnet“.
+- **Präparierte Eigenschaftslisten:** Ein 100-MB-Strom aus Eigenschaftslisten kostete 8–12 s, auch im Hauptprozess
+  ohne Zeitlimit und bei jedem Öffnen. Jetzt gilt ein Budget für alle `winmail.dat` einer Mail, nicht benötigte
+  Werte fester Größe werden in einem Schritt übersprungen: 0,3–0,4 s.
+- **Namen ohne Längengrenze:** Ein Name mit Millionen Zeichen landete in Teil, Zeile „Anhänge:“ und Suchindex.
+  Jetzt höchstens 255 Zeichen (die Endung bleibt), auch bei Namen von Mail-Anhängen; die MIME-Art ebenso.
+- **Anzeige und Bericht:** „auch unter“ nennt „(Anhang 2 aus winmail.dat)“; der Bericht schreibt „darin 1 Anhang“
+  und unterscheidet die `winmail.dat` ohne lesbaren Anhang („davon 94 nur Logos, 20 ohne Anhänge“).
+- **Mailtext aus RTF:** In Windows-1252 nicht belegte Bytes (meist Zeichen einer Symbolschrift) fallen weg statt
+  „�“ zu werden; ein Fehler beim Lesen dieses Mailtexts wird ein Hinweis und kostet nicht die Mail.
+
+Nicht geändert: Scheitert das Neulesen einer bisher fertigen Mail ganz (Status „Fehler“), ist ihr alter Stand bis zu
+einem erfolgreichen Lauf nicht durchsuchbar – wie bei jeder geänderten Datei. Zeitlimit und wiederholte Abstürze
+fängt schon das Lesen nur mit dem Mailtext ab, das die bekannten Seiten übernimmt; im Probelauf gab es keinen Fehler.
+
+**Verifiziert:** 841 Tests grün, davon 12 neue (nur erfundene Daten; die alte Reihenfolge der Erkennung ist im Test
+nachgebildet). Abschlussprobe mit echten Daten: die 20 Vorgangsordner mit den übrigen 32 Mails mit `winmail.dat`
+(außerhalb der beiden schon geprüften Bereiche; 147 Dateien, eigener Index, `--parallel 3`, Domus nur gelesen).
+Alter Stand als Format 10 eingelesen (0,2 min, 104 Seiten per Texterkennung, 0 Fehler). Danach stellte `bericht`
+mit dem neuen Stand um: alle 147 Dateien weiter fertig, alle 32 Mails per Suche gefunden, keine als „geändert“, der
+Bericht nannte „32 noch nicht geöffnet“. `index` las genau diese 32 Mails neu (unter 1 s, 0 Fehler), alle übrigen
+Dateien unverändert; 22 Anhänge darin (21 PDF, 1 Word) mit 97 Seiten, 12 `winmail.dat` nur mit Logos. 63
+OCR-Seiten übernommen, 1 Seite neu erkannt, Seitenbereiche lückenlos, die übrigen Teile aller 32 Mails unverändert.
+Alle 22 Anhänge ließen sich über `find_part` mit passender sha256 öffnen; die 18, die es auch als eigene Datei
+gibt, stehen dort unter „auch unter“ mit „(Anhang k aus winmail.dat)“. Ein zweiter Lauf las nichts; die alte
+Version lehnt den Index ab. Größe, Änderungszeit, ctime und sha256 der 147 Dateien und der 40 Ordner waren vorher
+und nachher gleich.
+
 ## winmail.dat aus Outlook (TNEF) (16.11.2026)
 
 Eine Vermessung des echten Bestands (alle Mails nur gelesen) ergab: knapp 1 % der Mails tragen eine `winmail.dat`,
@@ -27,13 +65,17 @@ in den jüngsten Vorgangsordnern ein Drittel; darin stecken vor allem PDFs, von 
 - **Mailtext:** Hat die Mail keinen brauchbaren Text (weniger als drei Buchstaben oder Ziffern), gilt der Text der
   `winmail.dat`; sonst wird nichts doppelt gespeichert. Im Bestand hat jede dieser Mails eigenen Text.
 - **Robustheit:** Der Leser wirft nie; Längen werden gegen den Rest geprüft, Attribute (100.000), Eigenschaften je
-  Liste (20.000), Anhänge (1.000) und entpacktes RTF (4 MB) sind begrenzt. Kaputte oder abgeschnittene Ströme
-  liefern das Lesbare, der Rest steht als Hinweis am Teil; eine falsche Prüfsumme ist nur ein Hinweis.
+  Liste (20.000), Anhänge (1.000) und entpacktes RTF (4 MB) sind begrenzt, ebenso die Arbeit für
+  Eigenschaftslisten (200.000 Eigenschaften und Werte für alle `winmail.dat` einer Mail zusammen; nicht benötigte
+  Werte fester Größe werden in einem Schritt übersprungen) und Namen (2.048 Zeichen im Leser, 255 im Teil – auch
+  bei Namen von Mail-Anhängen, die Endung bleibt). Kaputte oder abgeschnittene Ströme liefern das Lesbare, der Rest
+  steht als Hinweis am Teil; eine falsche Prüfsumme ist nur ein Hinweis.
 - **Erkennung:** `sniff` prüft die TNEF-Kennung jetzt vor der Suche nach „%PDF-“ hinter einem Vorspann – eine
   kleine `winmail.dat` mit einem PDF vorn galt sonst als PDF.
-- **Anzeige:** Suche, `belegsuche suche` und Oberfläche zeigen „Anhang 3 · Rechnung.pdf (aus winmail.dat)“; die
-  Logzeile zählt „2 Anhänge (1 aus winmail.dat)“; der Bericht zählt die `winmail.dat` getrennt (geöffnet, Anhänge
-  darin, nicht ausgewertet mit Grund).
+- **Anzeige:** Suche, `belegsuche suche` und Oberfläche zeigen „Anhang 3 · Rechnung.pdf (aus winmail.dat)“, „auch
+  unter“ nennt „(Anhang 3 aus winmail.dat)“; die Logzeile zählt „2 Anhänge (1 aus winmail.dat)“; der Bericht zählt
+  die `winmail.dat` getrennt (geöffnet, davon nur Logos bzw. ohne Anhänge, Anhänge darin, nicht ausgewertet mit
+  Grund, noch nicht geöffnet).
 
 **Verifiziert:** 829 Tests grün, davon 64 neue in `tests/test_tnef.py` und `tests/test_winmail.py` (nur erfundene
 Daten: Bauhelfer für TNEF, LZFu und MELA in `tests/conftest.py`, Testvektoren aus MS-OXRTFCP, kaputte und
@@ -182,14 +224,18 @@ Ein privater Suchindex wurde für diese Projektprüfung nicht geöffnet oder mig
 Indexformat 10 ergänzt die Tabellen `parts` und `mails` und schreibt bei E-Mails Betreff, Absender, Empfänger,
 Datum und den Anhangnamen in die Pfadspalte des Suchindex. Indexformat 11 öffnet `winmail.dat` (Teil `tnef`,
 Anhänge darin mit `mime_path` „…!k“). Ein Index im Format 9 oder 10 wird ohne Neuaufbau umgestellt (nur das Format
-wird vermerkt; vorhandene Suchzeilen ändern sich nicht). Dabei – und vor jedem `belegsuche index`, damit auch Mails
-eines noch laufenden älteren Programms erfasst werden – werden genau die fertigen Mails zum Neueinlesen vorgemerkt,
-deren `winmail.dat` Format 10 nur vermerkt hat (`parts.note` „nicht ausgewertet (winmail.dat aus Outlook)“). Ihr
-alter Stand wird nicht übernommen, auch nicht von einer gleichen Mail an anderem Ort; die schon erkannten Seiten
-ihrer übrigen Anhänge übernimmt das Neulesen aus ihren eigenen Teilen, ohne neue Texterkennung. Bis dahin bleibt
-ihr bisheriger Text durchsuchbar. Noch ältere Suchindizes werden aus ihren gespeicherten Seitentexten neu aufgebaut
-– auch bei bereits indizierten Dateien, die auf das erneute Einlesen warten. Bestehende OCR-Ergebnisse werden bei
-diesen Umstellungen nicht ersetzt. Ältere Programmversionen lehnen einen Index im Format 11 ab.
+wird vermerkt; vorhandene Suchzeilen ändern sich nicht). Bei 10 → 11 bekommen außerdem Teile, die Format 10 als PDF
+gelesen hat, obwohl sie eine `winmail.dat` sind (`kind 'pdf'` mit Typ `application/ms-tnef` oder Name
+`winmail.dat`), den Hinweis einer nur vermerkten `winmail.dat`. Sonst ändert die Umstellung nichts: die Mails
+gelten weiter als fertig, Suche und Oberfläche zeigen sie nicht als „geändert“. Erst `belegsuche index` merkt zu
+Beginn – nur in den Ordnern, die er einliest, und bei jedem Lauf, damit auch Mails eines noch laufenden älteren
+Programms erfasst werden – genau die fertigen Mails zum Neueinlesen vor, deren `winmail.dat` Format 10 nur
+vermerkt hat (`parts.note` „nicht ausgewertet (winmail.dat aus Outlook)“). Ihr alter Stand wird nicht übernommen,
+auch nicht von einer gleichen Mail an anderem Ort; die schon erkannten Seiten ihrer übrigen Anhänge übernimmt das
+Neulesen aus ihren eigenen Teilen, ohne neue Texterkennung. Bis dahin bleibt ihr bisheriger Text durchsuchbar; der
+Bericht nennt sie „noch nicht geöffnet“. Noch ältere Suchindizes werden aus ihren gespeicherten Seitentexten neu
+aufgebaut – auch bei bereits indizierten Dateien, die auf das erneute Einlesen warten. Bestehende OCR-Ergebnisse
+werden bei diesen Umstellungen nicht ersetzt. Ältere Programmversionen lehnen einen Index im Format 11 ab.
 
 ## Bekannte Grenzen
 
@@ -200,7 +246,10 @@ diesen Umstellungen nicht ersetzt. Ältere Programmversionen lehnen einen Index 
   ein Hinweis), ebenso verschlüsselte Outlook-Nachrichten (S/MIME); bei Kalendereinladungen werden nur die Anhänge
   gelesen, nicht die Termindaten. Eingebettete Nachrichten und `winmail.dat` in der `winmail.dat` bis Tiefe 2. Der
   Text der `winmail.dat` zählt nur, wenn die Mail keinen eigenen hat. Die Nachrichtenattribute (Absender, Datum)
-  der `winmail.dat` werden nicht ausgewertet; Kopf und Datum kommen aus der Mail.
+  der `winmail.dat` werden nicht ausgewertet; Kopf und Datum kommen aus der Mail. Eine `winmail.dat`, die Format 10
+  als PDF gelesen hat, erfasst nur die Umstellung selbst – schreibt danach noch ein älteres Programm weiter, bleibt
+  so ein Teil stehen (im echten Index gab es keinen). Bei präparierten Dateien, die das Budget für Eigenschaften
+  aufbrauchen, fehlen Name und Art der übrigen Anhänge (Name dann aus dem Titel); ihre Daten werden gelesen.
 - Bilder in Word-Dateien werden nicht per Texterkennung gelesen (eingescannte Belege in Word bleiben ohne Text,
   mit Hinweis). Seiten einer Word-Datei gibt es nur an harten Seitenumbrüchen; sonst ist sie eine Seite.
 - Zitierte Vorgänger-Mails bleiben im Mailtext und werden mit durchsucht.

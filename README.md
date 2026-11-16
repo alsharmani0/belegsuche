@@ -240,10 +240,12 @@ dort nur die eingebauten.
     im Mailtext („Anhang in DOMUS abgelegt: …“).
   - **`winmail.dat`** (Outlook, Format TNEF; erkannt am Inhalt, auch unter anderem Namen wie `ATT00001.dat`): Die
     Anhänge darin (PDF, Bilder, Word …) werden wie normale Anhänge gelesen und durchsucht; ein Treffer darin zeigt
-    „(aus winmail.dat)“ und lässt sich wie jeder Anhang öffnen. Signatur-Logos und reine Formatierung fallen weg.
+    „(aus winmail.dat)“ – auch unter „auch unter“ – und lässt sich wie jeder Anhang öffnen. Signatur-Logos und
+    reine Formatierung fallen weg.
     In der `winmail.dat` eingebettete Outlook-Nachrichten werden wie weitergeleitete Mails gelesen. Hat die Mail
     selbst keinen Text, gilt der Text aus der `winmail.dat`. Ist sie kaputt oder abgeschnitten, wird gelesen, was
-    lesbar ist; der Rest steht als Hinweis am Anhang.
+    lesbar ist; der Rest steht als Hinweis am Anhang. Präparierte Dateien bremsen das Einlesen nicht aus
+    (Grenzen für Eigenschaften je Mail und für die Länge von Namen).
   - Nicht ausgewertet (Hinweis am Anhang, kein Fehler der Mail): Excel, ZIP, Videos, Anhänge über 50 MB
     (`winmail.dat` über 100 MB), passwortgeschützte PDFs. Höchstens 60 Anhänge und 1000 Seiten je Mail (Anhänge in
     einer `winmail.dat` zählen mit).
@@ -253,14 +255,16 @@ dort nur die eingebauten.
     einmal erkannt ist, und übernimmt dann den Text.
 - Outlook-`.msg`, Excel und ZIP werden im Bericht als „nicht unterstützt“ gezählt. Der Bericht nennt außerdem
   die Zahl der eingelesenen E-Mails und Word-Dateien, wie viele Mail-Anhänge ausgewertet, übernommen,
-  als Platzhalter erkannt oder nicht ausgewertet wurden und wie viele `winmail.dat` geöffnet wurden (mit der Zahl
-  der Anhänge darin und dem Grund, falls eine nicht lesbar war).
+  als Platzhalter erkannt oder nicht ausgewertet wurden und wie viele `winmail.dat` geöffnet wurden (davon nur mit
+  Logos bzw. ohne Anhänge, mit der Zahl der Anhänge darin und dem Grund, falls eine nicht lesbar war) – und wie
+  viele noch nicht geöffnet sind, weil sie eine frühere Version eingelesen hat.
 
 Ein vorhandener Index wird beim ersten Start auf das neue Format umgestellt, ohne neue Texterkennung und ohne
 Neuaufbau des Suchindex. E-Mails und Word-Dateien, die frühere Versionen als „nicht unterstützt“ eingetragen haben,
 liest der nächste `belegsuche index` ein. Ebenso liest er Mails mit `winmail.dat` neu, deren Anhänge eine frühere
-Version nicht geöffnet hat (Format 11) – nur diese Mails; schon erkannte Seiten werden dabei übernommen. Bis dahin
-bleibt ihr bisheriger Text durchsuchbar.
+Version nicht geöffnet hat (Format 11) – nur diese Mails, und nur in den Ordnern, die er einliest; schon erkannte
+Seiten werden dabei übernommen. Bis dahin gelten sie als fertig (nicht als „geändert“), ihr bisheriger Text bleibt
+durchsuchbar, und der Bericht nennt sie als „noch nicht geöffnet“.
 
 ## Entwicklung
 
