@@ -227,13 +227,13 @@ def test_bericht_csv_mit_problemfaellen(tmp_path, capsys):
     digital_pdf(root / "geheim.pdf", [["Vertraulich"]], password="1234")
     good = (root / "gut.pdf").read_bytes()
     (root / "kaputt.pdf").write_bytes(good[: len(good) // 3])
-    (root / "Notiz.docx").write_bytes(b"PK\x03\x04 kein echtes word")
+    (root / "Liste.xlsx").write_bytes(b"PK\x03\x04 kein echtes excel")   # .docx wird seit Format 10 gelesen
     db = tmp_path / "i.db"
     run(capsys, "--db", db, "index", root, "--parallel", "1")
     ziel = tmp_path / "probleme.csv"
     rc, out = run(capsys, "--db", db, "bericht", "--csv", ziel)
     assert rc == 0 and "Problemliste gespeichert" in out
-    assert "nicht unterstützt:       1  (.docx 1)" in out
+    assert "nicht unterstützt:       1  (.xlsx 1)" in out
     raw = ziel.read_bytes()
     assert raw.startswith(b"\xef\xbb\xbf")                # Excel erkennt UTF-8 an der BOM
     rows = list(csv.reader(raw.decode("utf-8-sig").splitlines(), delimiter=";"))

@@ -14,7 +14,10 @@ from pathlib import Path
 SCHEMA_VERSION = 1
 # Format der Suchtexte (Zusatz-Tokens, Dokument-Index). Ändert es sich, wird der Suchindex aus den
 # gespeicherten Seitentexten neu aufgebaut – ohne neue Texterkennung.
-INDEX_FORMAT = "9"           # Hausnummern auch nach einem Komma an die Straße binden
+INDEX_FORMAT = "10"          # E-Mails: Mailkopf und Anhangname in der path-Spalte; Tabellen parts/mails
+# Von diesen Formaten aus ändern sich die vorhandenen Suchzeilen nicht: nur das Format vermerken, kein Neuaufbau
+# (der Index kann über 100.000 Seiten haben; die neuen Tabellen legt SCHEMA an)
+NO_REBUILD_FROM = {"9"}
 FILE_TOKEN = "0f"            # + files.id, steht in der path-Spalte jeder Seite
 # Dateien, die Suche und Oberfläche anzeigen und öffnen: fertig eingelesen – oder seitdem geändert und noch
 # nicht neu eingelesen (bis dahin gilt der bisherige Text; er wird erst beim Neu-Einlesen ersetzt)
@@ -35,7 +38,7 @@ CREATE TABLE IF NOT EXISTS files (
     root_id    INTEGER NOT NULL REFERENCES roots(id) ON DELETE CASCADE,
     relpath    TEXT NOT NULL,
     ext        TEXT,
-    kind       TEXT,              -- pdf | image | unsupported
+    kind       TEXT,              -- pdf | image | mail | word | unsupported
     size       INTEGER,
     mtime      REAL,
     sha256     TEXT,
@@ -71,6 +74,33 @@ CREATE VIRTUAL TABLE IF NOT EXISTS vocab USING fts5vocab(fts, 'row');
 
 -- rowid = files.id, nur mehrseitige Dokumente: findet Belege, deren Suchbegriffe auf verschiedenen Seiten stehen
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_doc USING fts5(body, tokenize = "unicode61 remove_diacritics 0");
+
+-- Teile einer E-Mail: 0 = Mailkopf + Mailtext (Seite 1), danach die Anhänge. Die Seiten in `pages` sind
+-- fortlaufend nummeriert; ein Teil belegt die Seiten first_page .. first_page + n_pages - 1.
+CREATE TABLE IF NOT EXISTS parts (
+    file_id    INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    part_no    INTEGER NOT NULL,
+    first_page INTEGER,                 -- NULL, wenn der Teil keine eigenen Seiten hat
+    n_pages    INTEGER NOT NULL DEFAULT 0,
+    kind       TEXT NOT NULL,           -- body | pdf | image | word | text | mail | link | skipped
+    name       TEXT,
+    mime       TEXT,
+    size       INTEGER,
+    sha256     TEXT,
+    mime_path  TEXT,                    -- Lage im MIME-Baum (siehe mail.find_part)
+    note       TEXT,                    -- Hinweis (zu groß, nicht ausgewertet …); bei 'link': Pfad der Datei
+    PRIMARY KEY (file_id, part_no)
+);
+CREATE INDEX IF NOT EXISTS parts_sha ON parts(sha256);
+
+CREATE TABLE IF NOT EXISTS mails (
+    file_id    INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+    subject    TEXT,
+    sender     TEXT,
+    recipients TEXT,
+    sent_at    TEXT,                    -- ISO 8601; fehlt Date:, die Änderungszeit der Datei
+    message_id TEXT
+);
 """
 
 
@@ -134,9 +164,10 @@ def connect(path: Path, readonly: bool = False) -> sqlite3.Connection:
             # auf den Schreibzugriff erneut prüfen, bevor wir den gesamten Index aufbauen.
             con.execute("BEGIN IMMEDIATE")
             _check_compatible(con, allow_empty=False)
-            if get_meta(con, "index_format") != INDEX_FORMAT:
+            old = get_meta(con, "index_format")
+            if old != INDEX_FORMAT:
                 set_meta(con, "index_format", INDEX_FORMAT)
-                if con.execute("SELECT 1 FROM pages LIMIT 1").fetchone():
+                if old not in NO_REBUILD_FROM and con.execute("SELECT 1 FROM pages LIMIT 1").fetchone():
                     print("Suchindex wird auf das neue Format umgestellt (einmalig, ohne neue Texterkennung) …",
                           file=sys.stderr)
                     rebuild_search_index(con)
@@ -152,18 +183,62 @@ def delete_search_rows(con: sqlite3.Connection, file_id: int) -> None:
     con.execute("DELETE FROM fts_doc WHERE rowid = ?", (file_id,))
 
 
+def german_date(iso: str | None, with_time: bool = True) -> str:
+    """ISO-Zeitpunkt (mails.sent_at) als „12.03.2021 14:05“; leer, wenn nicht lesbar."""
+    from datetime import datetime
+    if not iso:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        return ""
+    return dt.strftime("%d.%m.%Y %H:%M" if with_time else "%d.%m.%Y")
+
+
+def _mail_path_texts(con: sqlite3.Connection, file_id: int) -> tuple[str, list[tuple[int, int, str]]] | None:
+    """Für E-Mails: Mailkopf als Suchtext und die Seitenbereiche der Anhänge mit ihrem Namen."""
+    try:
+        row = con.execute("SELECT subject, sender, recipients, sent_at FROM mails WHERE file_id = ?",
+                          (file_id,)).fetchone()
+    except sqlite3.OperationalError:     # Index ohne Tabelle mails (nur lesend geöffnet, vor Format 10)
+        return None
+    if row is None:
+        return None
+    from .normalize import index_text
+    head = index_text(" ".join(x for x in (row[0], row[1], row[2], german_date(row[3], False)) if x))
+    ranges = [(r[0], r[0] + r[1] - 1, r[2]) for r in con.execute(
+        "SELECT first_page, n_pages, name FROM parts WHERE file_id = ? AND n_pages > 0 AND first_page IS NOT NULL"
+        " AND part_no > 0 AND name IS NOT NULL", (file_id,))]
+    return head, ranges
+
+
 def index_file_text(con: sqlite3.Connection, file_id: int, relpath: str) -> None:
-    """Suchindex einer Datei aus ihren gespeicherten Seitentexten (neu) schreiben."""
+    """Suchindex einer Datei aus ihren gespeicherten Seitentexten (neu) schreiben.
+
+    Bei E-Mails stehen Betreff, Absender, Empfänger und Datum in der path-Spalte aller Seiten (auch der
+    Anhangseiten) und dazu der Name des Anhangs, zu dem die Seite gehört: „Absender + Betrag im Anhang“ passt so
+    auch auf Seite 3 eines Anhangs (Treffer in der path-Spalte zählen abgewertet, siehe search.PATH_FACTOR)."""
     from .normalize import index_text, path_index_text
     delete_search_rows(con, file_id)
     ptext = f"{path_index_text(relpath)} {FILE_TOKEN}{file_id}"   # Dateikennung: Seiten einer Datei gezielt abfragen
+    mail = _mail_path_texts(con, file_id)
     bodies = []
-    for pid, text in con.execute("SELECT id, text FROM pages WHERE file_id = ? ORDER BY page_no", (file_id,)).fetchall():
+    for pid, page_no, text in con.execute("SELECT id, page_no, text FROM pages WHERE file_id = ? ORDER BY page_no",
+                                          (file_id,)).fetchall():
         body = index_text(text)
         bodies.append(body)
-        con.execute("INSERT INTO fts(rowid, path, body) VALUES (?, ?, ?)", (pid, ptext, body))
+        path = ptext
+        if mail is not None:
+            head, ranges = mail
+            name = next((n for a, b, n in ranges if a <= page_no <= b), "")
+            path = " ".join(x for x in (ptext, head, path_index_text(name) if name else "") if x)
+        con.execute("INSERT INTO fts(rowid, path, body) VALUES (?, ?, ?)", (pid, path, body))
     if len(bodies) > 1:
         con.execute("INSERT INTO fts_doc(rowid, body) VALUES (?, ?)", (file_id, " ".join(bodies)))
+
+
+def has_table(con: sqlite3.Connection, name: str) -> bool:
+    return con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)).fetchone() is not None
 
 
 def rebuild_search_index(con: sqlite3.Connection) -> None:

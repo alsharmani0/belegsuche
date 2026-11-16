@@ -60,6 +60,25 @@ def load_image(path: Path) -> Image.Image:
             raise ImageFormatError(f"Bildformat nicht lesbar ({e})") from e
 
 
+def load_image_bytes(data: bytes) -> Image.Image:
+    """Wie load_image, aber aus Bytes (Mail-Anhang). Formate, die Pillow nicht kennt (HEIC), kommen in eine
+    Datei in einem eigenen Temp-Ordner unter dem System-Temp – nie neben dem Original – und von dort zu `sips`."""
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            return to_rgb(ImageOps.exif_transpose(im))
+    except UnidentifiedImageError:
+        pass
+    tmp = tempfile.mkdtemp(prefix="belegsuche-anhang-")
+    try:
+        src = Path(tmp) / "anhang.heic"
+        fd = os.open(src, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        return load_image(src)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 @dataclass
 class OcrResult:
     text: str
@@ -159,6 +178,19 @@ class AppleVisionOCR:
             del handler, url
         return res
 
+    def recognize_bytes(self, raw: bytes) -> OcrResult:
+        """Bild aus dem Speicher lesen (Mail-Anhang, auch HEIC) – ohne Temp-Datei."""
+        import objc
+        import Vision
+        from Foundation import NSData
+        raw = bytes(raw)
+        with objc.autorelease_pool():
+            data = NSData.dataWithBytes_length_(raw, len(raw))
+            handler = Vision.VNImageRequestHandler.alloc().initWithData_options_(data, None)
+            res = self._run(handler)
+            del handler, data
+        return res
+
 
 class TesseractOCR:
     name = "tesseract"
@@ -197,6 +229,9 @@ class TesseractOCR:
 
     def recognize_file(self, path: Path) -> OcrResult:
         return self.recognize_image(load_image(path))
+
+    def recognize_bytes(self, raw: bytes) -> OcrResult:
+        return self.recognize_image(load_image_bytes(raw))   # HEIC bei Bedarf über sips im System-Temp
 
 
 def enhance(img: Image.Image) -> Image.Image:

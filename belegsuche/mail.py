@@ -1,0 +1,744 @@
+"""E-Mails (.eml) lesen: Kopf, Mailtext und Anhänge – nur im Speicher, nichts wird geschrieben.
+
+Seitenmodell (Tabelle pages, fortlaufend nummeriert):
+- Seite 1: Mailkopf (Betreff, Von, An, Cc, Datum) und Mailtext. HTML-Mails werden mit html.parser aus der
+  Standardbibliothek in Text umgewandelt (kein Netzzugriff, keine Bilder, kein AppKit).
+- Danach die Seiten der Anhänge: PDF, Bilder (Texterkennung), Word, Text und weitergeleitete Mails (.eml,
+  bis Tiefe 2). Jeder Anhang ist ein Teil (Tabelle parts) mit seinem Seitenbereich.
+
+Anhänge werden an den ersten Bytes erkannt: die Mehrzahl heißt nur application/octet-stream. DOMUS-Platzhalter
+(„Die Datei '…' wurde in die Dokumentenverwaltung von DOMUS … verschoben“) werden am Inhalt erkannt: kein eigener
+Text, sondern ein Verweis (Teil 'link') auf die gleichnamige Datei im Vorgangsordner.
+
+Übliche Auslassungen (Signatur-Logos, winmail.dat, Excel, ZIP, zu große Anhänge, passwortgeschützte PDFs) sind
+kein Fehler der Mail: sie stehen als Hinweis am Teil (parts.note).
+
+mime_path: Lage eines Teils im MIME-Baum, wie IMAP-Abschnitte: „1“, „2.1“ … (1-basiert; eine Mail ohne
+multipart hat nur „1“). „/“ trennt die Ebene einer angehängten Mail: „3/1.2“ = in Teil 3 (eine Mail) deren
+Teil 1.2. find_part() findet den Teil darüber wieder.
+"""
+from __future__ import annotations
+
+import base64
+import binascii
+import hashlib
+import os
+import re
+import unicodedata
+from dataclasses import dataclass, field
+from datetime import datetime
+from email import policy
+from email.header import decode_header, make_header
+from email.message import Message
+from email.parser import BytesHeaderParser, BytesParser
+from email.utils import parsedate_to_datetime
+from html.parser import HTMLParser
+from pathlib import Path
+
+from .extract import (IMAGE_KINDS, MAX_IMAGE_PAGES, MIN_CROP_PX, NOTE_PREFIX, Extracted, ExtractError, MailInfo,
+                      PageText, PartInfo, _page_done, extract_image_bytes, extract_pdf, image_size, sniff)
+
+MAX_MAIL_BYTES = 200 * 1024 * 1024        # größere .eml: nur der Kopf
+MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024   # größere Anhänge werden nicht ausgewertet
+MAX_MAIL_PARTS = 60                       # höchstens so viele Anhänge je Mail
+MAX_MAIL_PAGES = MAX_IMAGE_PAGES          # Seiten je Mail insgesamt (wie bei mehrseitigen Bildern)
+MIN_INLINE_IMAGE_BYTES = 10 * 1024        # kleinere Bilder im Mailtext (Signatur-Logos) nicht erkennen
+MAX_DEPTH = 2                             # angehängte Mails in angehängten Mails: so tief
+PLACEHOLDER_MAX_BYTES = 1024
+MAX_TEXT_ATTACHMENT_BYTES = 5 * 1024 * 1024
+PLACEHOLDER_RE = re.compile(r"Die Datei '([^\n]+?)' wurde in die Dokumentenverwaltung von DOMUS (CRM|NAVI) verschoben")
+REUSED_NOTE = "Text übernommen (gleicher Inhalt schon eingelesen)"
+SAFE_NOTE = "nicht gelesen (nur Mailtext nach Zeitlimit oder Absturz)"
+SAFE_MAIL_NOTE = (f"{NOTE_PREFIX} nur Mailtext eingelesen – PDF- und Bild-Anhänge nach Zeitlimit oder Absturz "
+                  "übersprungen")
+NOT_EVALUATED = "nicht ausgewertet"
+EVALUATED_KINDS = ("pdf", "image", "word", "text", "mail")
+REUSABLE_KINDS = ("pdf", "image", "word")   # Seiten 1:1 übertragbar (gleicher Inhalt = gleiche Seiten)
+
+_SIGNATURE_TYPES = {"application/pkcs7-signature", "application/x-pkcs7-signature", "application/pgp-signature"}
+_ENCRYPTED_TYPES = {"application/pkcs7-mime", "application/x-pkcs7-mime", "multipart/encrypted"}
+_TEXT_TYPES = {"text/plain", "text/csv", "text/html", "text/tab-separated-values"}
+_TEXT_EXT = (".txt", ".csv", ".tsv", ".htm", ".html")
+_WORD_EXT = (".doc", ".docx", ".dot", ".dotx", ".dotm", ".rtf", ".odt")
+_MAIL_HEAD_RE = re.compile(rb"^(?:[\w-]{2,40}:[^\r\n]*\r?\n){2,}", re.ASCII)
+_MAIL_HEADERS = (b"from:", b"to:", b"subject:", b"date:", b"received:", b"message-id:", b"mime-version:",
+                 b"return-path:")
+
+
+# --- Text säubern ---------------------------------------------------------------------------------------
+
+def clean(s: str | None) -> str:
+    """Kopfzeile/Name: Steuer- und Formatzeichen (auch Richtungswechsel U+202E) entfernen, Leerraum
+    zusammenfassen, Unicode NFC (Namen vom Mac kommen oft zerlegt: u + ¨)."""
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFC", str(s))
+    s = "".join(" " if unicodedata.category(c) in ("Cc", "Zl", "Zp") else c for c in s
+                if unicodedata.category(c) not in ("Cf", "Cs", "Co", "Cn"))
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _decode_bytes(raw: bytes, charset: str | None) -> str:
+    """Text eines Mailteils. Ohne Angabe (oder us-ascii mit 8-Bit-Inhalt): UTF-8, sonst Windows-1252.
+    iso-8859-1 wird als Windows-1252 gelesen (Obermenge, enthält z. B. das €-Zeichen)."""
+    cs = (charset or "").strip().strip('"').lower()
+    if cs in ("", "us-ascii", "ascii", "unknown-8bit", "x-unknown", "default"):
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return raw.decode("cp1252", errors="replace")
+    if cs in ("iso-8859-1", "latin-1", "latin1", "iso8859-1", "iso_8859-1", "windows-1252", "cp1252"):
+        return raw.decode("cp1252", errors="replace")
+    try:
+        return raw.decode(cs, errors="replace")
+    except LookupError:                        # unbekannter Zeichensatz
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return raw.decode("cp1252", errors="replace")
+
+
+def _payload(part: Message) -> bytes:
+    """Dekodierter Inhalt eines Blatt-Teils (base64/quoted-printable); kaputte Kodierung so weit wie möglich."""
+    try:
+        data = part.get_payload(decode=True)
+    except Exception:
+        data = None
+    if data is None:
+        raw = part.get_payload()
+        if isinstance(raw, str):
+            data = raw.encode("utf-8", errors="surrogateescape")
+        else:
+            data = b""
+    return data
+
+
+def part_text(part: Message) -> str:
+    raw = _payload(part)
+    text = _decode_bytes(raw, part.get_content_charset())
+    if part.get_content_type() == "text/html":
+        return html_to_text(text)
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+class _HTMLText(HTMLParser):
+    SKIP = {"script", "style", "head", "title", "noscript", "template", "xml", "svg", "object", "iframe"}
+    BLOCK = {"p", "div", "br", "tr", "li", "ul", "ol", "table", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote",
+             "pre", "hr", "section", "article", "header", "footer", "dd", "dt", "dl", "address", "center", "form"}
+    CELL = {"td", "th"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.out: list[str] = []
+        self.skip = 0
+        self.pre = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "body":                  # nicht geschlossener <head>: der Text beginnt trotzdem hier
+            self.skip = 0
+        if tag in self.SKIP:
+            self.skip += 1
+        elif tag in self.BLOCK:
+            self.out.append("\n")
+            if tag == "pre":
+                self.pre += 1
+        elif tag in self.CELL:
+            self.out.append("\t")
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP:
+            self.skip = max(0, self.skip - 1)
+        elif tag in self.BLOCK:
+            self.out.append("\n")
+            if tag == "pre":
+                self.pre = max(0, self.pre - 1)
+
+    def handle_data(self, data):
+        if self.skip:
+            return
+        self.out.append(data if self.pre else re.sub(r"\s+", " ", data))
+
+
+def html_to_text(html: str) -> str:
+    """HTML-Mailtext als Text: Skripte, Stile und Kopf weg, Absätze als Zeilen, Entities aufgelöst.
+    Nur html.parser der Standardbibliothek: lädt nichts nach, führt nichts aus."""
+    p = _HTMLText()
+    try:
+        p.feed(html)
+        p.close()
+    except Exception:                     # html.parser ist nachsichtig; zur Sicherheit trotzdem abfangen
+        pass
+    lines = [re.sub(r"[ \t\xa0]+", " ", ln).strip() for ln in "".join(p.out).replace("\r", "").split("\n")]
+    text = "\n".join(lines)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+# --- Kopf ----------------------------------------------------------------------------------------------
+
+def _raw_header(msg: Message, name: str) -> str:
+    """Kopfzeile ohne die Prüfungen von policy.default (die bei kaputten Adressen Ausnahmen werfen können)."""
+    for k, v in msg.raw_items():
+        if k.lower() == name.lower():
+            try:
+                return str(make_header(decode_header(str(v))))
+            except Exception:
+                return str(v)
+    return ""
+
+
+def header(msg: Message, name: str) -> str:
+    try:
+        v = msg.get(name)
+        v = "" if v is None else str(v)
+    except Exception:
+        v = _raw_header(msg, name)
+    return clean(v)
+
+
+def _mail_date(msg: Message) -> datetime | None:
+    try:
+        h = msg.get("Date")
+        dt = getattr(h, "datetime", None)
+        if dt is None and h is not None:
+            dt = parsedate_to_datetime(str(h))
+        return dt
+    except Exception:
+        raw = _raw_header(msg, "Date")
+        try:
+            return parsedate_to_datetime(raw) if raw else None
+        except Exception:
+            return None
+
+
+@dataclass
+class _Head:
+    info: MailInfo
+    lines: list[str]
+
+
+def read_head(msg: Message, mtime: float | None) -> _Head:
+    subject, sender = header(msg, "Subject"), header(msg, "From")
+    to, cc = header(msg, "To"), header(msg, "Cc")
+    dt = _mail_date(msg)
+    lines = [f"Betreff: {subject}" if subject else "Betreff: (ohne Betreff)"]
+    if sender:
+        lines.append(f"Von: {sender}")
+    if to:
+        lines.append(f"An: {to}")
+    if cc:
+        lines.append(f"Cc: {cc}")
+    if dt is not None:
+        lines.append(f"Datum: {dt.strftime('%d.%m.%Y %H:%M')}")
+    elif mtime is not None:
+        dt = datetime.fromtimestamp(mtime).astimezone()
+        lines.append(f"Datum: {dt.strftime('%d.%m.%Y %H:%M')} (Änderungsdatum der Datei – Mail ohne Datum)")
+    if header(msg, "X-Unsent") == "1":
+        lines.append("Entwurf (nicht gesendet)")
+    sent_at = None
+    if dt is not None:
+        try:
+            sent_at = dt.isoformat(timespec="seconds")
+        except (ValueError, OverflowError):
+            sent_at = None
+    recipients = ", ".join(x for x in (to, cc) if x) or None
+    info = MailInfo(subject=subject or None, sender=sender or None, recipients=recipients, sent_at=sent_at,
+                    message_id=header(msg, "Message-ID") or None)
+    return _Head(info, lines)
+
+
+# --- MIME-Baum -----------------------------------------------------------------------------------------
+
+@dataclass
+class _Leaf:
+    part: Message
+    path: str                              # mime_path innerhalb der aktuellen Mail
+    alt: int | None = None                 # id() des nächsten multipart/alternative darüber
+    text: str | None = None                # kaputtes multipart (Grenze fehlt): roher Inhalt
+
+
+def _leaves(msg: Message) -> list[_Leaf]:
+    out: list[_Leaf] = []
+    stack: list[tuple[Message, str, int | None]] = [(msg, "", None)]
+    while stack:
+        part, path, alt = stack.pop()
+        ctype = part.get_content_type()
+        if part.is_multipart() and ctype != "message/rfc822":
+            payload = part.get_payload()
+            kid_alt = id(part) if ctype == "multipart/alternative" else alt
+            kids = [(k, f"{path}.{i}" if path else str(i), kid_alt) for i, k in enumerate(payload, 1)
+                    if isinstance(k, Message)]
+            stack.extend(reversed(kids))
+            continue
+        leaf_path = path or "1"
+        if part.get_content_maintype() == "multipart":       # Grenze fehlt: Inhalt ist ein String
+            raw = part.get_payload()
+            if isinstance(raw, str) and raw.strip():
+                out.append(_Leaf(part, leaf_path, alt, text=raw))
+            continue
+        out.append(_Leaf(part, leaf_path, alt))
+    return out
+
+
+def _filename(part: Message) -> str:
+    try:
+        name = part.get_filename()
+    except Exception:
+        name = None
+    if not name:
+        try:
+            name = part.get_param("name")
+            if isinstance(name, tuple):           # RFC 2231
+                name = name[2]
+        except Exception:
+            name = None
+    # nur der Dateiname, kein Pfad
+    name = clean(name).replace("\\", "/").rsplit("/", 1)[-1] if name else ""
+    return name
+
+
+def _disposition(part: Message) -> str | None:
+    try:
+        return part.get_content_disposition()
+    except Exception:
+        return None
+
+
+def _is_body_text(leaf: _Leaf) -> bool:
+    if leaf.text is not None:
+        return True
+    p = leaf.part
+    return (p.get_content_type() in ("text/plain", "text/html") and _disposition(p) != "attachment"
+            and not _filename(p))
+
+
+def _body_text(msg: Message, leaves: list[_Leaf]) -> tuple[str, set[int]]:
+    """Mailtext: get_body() (bevorzugt text/plain), dazu weitere Textteile (z. B. Text zwischen Inline-Bildern).
+    Von jeder multipart/alternative-Gruppe nur eine Fassung. get_body() bricht bei kaputten Mails mit leerem
+    multipart/related ab – dann zählt der eigene Durchgang. Rückgabe: (Text, ids der verwendeten Teile)."""
+    try:
+        primary = msg.get_body(preferencelist=("plain", "html"))
+    except Exception:
+        primary = None
+    cands = [lf for lf in leaves if _is_body_text(lf)]
+    groups: dict[int, list[_Leaf]] = {}
+    order: list[int] = []
+    for lf in cands:
+        key = lf.alt if lf.alt is not None else id(lf.part)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(lf)
+    texts, used = [], set()
+    for key in order:
+        grp = groups[key]
+        # bevorzugt: was get_body() gewählt hat, sonst text/plain; ist diese Fassung leer, die nächste
+        prefs = sorted(grp, key=lambda lf: (lf.part is not primary,
+                                           lf.text is not None or lf.part.get_content_type() != "text/plain"))
+        for pick in prefs:
+            try:
+                t = pick.text if pick.text is not None else part_text(pick.part)
+            except Exception:
+                t = ""
+            if t.strip():
+                texts.append(t.strip("\n"))
+                break
+        used.update(id(lf.part) for lf in grp)
+    return "\n\n".join(texts), used
+
+
+# --- Anhänge -------------------------------------------------------------------------------------------
+
+def _looks_like_mail(data: bytes) -> bool:
+    head = data[:4096].lstrip()
+    if not _MAIL_HEAD_RE.match(head):
+        return False
+    low = head.lower()
+    return sum(1 for h in _MAIL_HEADERS if low.startswith(h) or b"\n" + h in low) >= 2
+
+
+def _placeholder_name(data: bytes) -> str | None:
+    data = data.removeprefix(b"\xef\xbb\xbf")
+    if len(data) >= PLACEHOLDER_MAX_BYTES or not data.startswith(b"Die "):
+        return None
+    m = PLACEHOLDER_RE.match(_decode_bytes(data, None).lstrip("﻿"))
+    return clean(m.group(1)) if m else None
+
+
+@dataclass
+class _Att:
+    part: Message
+    path: str
+    name: str
+    mime: str
+    inline: bool
+    data: bytes
+    kind: str                         # pdf | image | word | text | mail | link | skipped | ignore
+    note: str | None = None
+    link: str | None = None           # DOMUS-Platzhalter: genannter Dateiname
+    _sha: str | None = None
+
+    @property
+    def sha(self) -> str:
+        if self._sha is None:
+            self._sha = hashlib.sha256(self.data).hexdigest()
+        return self._sha
+
+
+def _classify(lf: _Leaf, depth: int) -> _Att:
+    """Art eines Anhangs an seinem Inhalt (nicht an der Angabe in der Mail)."""
+    part = lf.part
+    mime = part.get_content_type()
+    name = _filename(part)
+    inline = _disposition(part) != "attachment"
+    if mime == "message/rfc822":
+        try:
+            inner = part.get_payload(0)
+            data = inner.as_bytes(policy=policy.default)
+        except Exception:
+            data = b""
+        att = _Att(part, lf.path, name or "Weitergeleitete Mail.eml", mime, inline, data, "mail")
+        if depth >= MAX_DEPTH:
+            att.kind, att.note = "skipped", f"{NOT_EVALUATED} (zu tief verschachtelte Mail)"
+        return att
+    data = _payload(part)
+    att = _Att(part, lf.path, name, mime, inline, data, "skipped")
+    low = name.lower()
+    if mime in _SIGNATURE_TYPES or low in ("smime.p7s", "signature.asc"):
+        att.kind = "ignore"
+        return att
+    if mime == "application/applefile":
+        att.kind = "ignore"
+        return att
+    if not data:
+        att.note = "leer (0 Byte)"
+        return att
+    magic = sniff(data)
+    if magic is None and data[:7] == b"JVBERi0":           # PDF doppelt base64-kodiert
+        try:
+            inner_pdf = base64.b64decode(data, validate=False)
+            if sniff(inner_pdf) == "pdf":
+                att.data, magic = inner_pdf, "pdf"
+        except (binascii.Error, ValueError):
+            pass
+    if magic == "appledouble":
+        att.kind = "ignore"
+        return att
+    if (link := _placeholder_name(data)) is not None:
+        att.kind, att.link = "link", link
+        return att
+    if magic == "pdf":
+        att.kind = "pdf"
+    elif magic in IMAGE_KINDS:
+        att.kind = "image"
+    elif magic == "rtf":
+        att.kind = "word"
+    elif magic == "zip":
+        from .word import is_word_zip
+        if is_word_zip(data):
+            att.kind = "word"
+        else:
+            att.note = f"{NOT_EVALUATED} (ZIP- oder Office-Datei)"
+    elif magic == "ole":
+        from .word import is_word_ole
+        if is_word_ole(data):
+            att.kind = "word"
+        else:
+            att.note = f"{NOT_EVALUATED} (Office- oder Outlook-Datei)"
+    elif magic == "tnef":
+        att.note = f"{NOT_EVALUATED} (winmail.dat aus Outlook)"
+    elif low.endswith(".eml") or (mime in ("application/octet-stream", "text/plain") and _looks_like_mail(data)
+                                  and not low.endswith(_TEXT_EXT)):
+        att.kind = "mail"
+    elif mime in _TEXT_TYPES or low.endswith(_TEXT_EXT):
+        att.kind = "text"
+    else:
+        ext = os.path.splitext(low)[1]
+        att.note = f"{NOT_EVALUATED} ({ext or mime})"
+    if att.kind == "mail" and depth >= MAX_DEPTH:
+        att.kind, att.note = "skipped", f"{NOT_EVALUATED} (zu tief verschachtelte Mail)"
+    if att.kind in EVALUATED_KINDS and len(att.data) > MAX_ATTACHMENT_BYTES:
+        att.note = f"{NOT_EVALUATED} (zu groß: {len(att.data) / (1024 * 1024):.0f} MB)"
+        att.kind = "skipped"
+    if att.kind == "text" and len(att.data) > MAX_TEXT_ATTACHMENT_BYTES:
+        att.note = f"{NOT_EVALUATED} (Textdatei zu groß)"
+        att.kind = "skipped"
+    if att.kind == "image" and (size := image_size(att.data)) is not None:
+        if max(size) < MIN_CROP_PX[0] or min(size) < MIN_CROP_PX[1]:
+            att.kind = "ignore" if inline else "skipped"
+            att.note = "Bild zu klein für die Texterkennung"
+    if att.kind == "image" and inline and len(att.data) < MIN_INLINE_IMAGE_BYTES:
+        att.kind = "ignore"               # Signatur-Logo im Mailtext
+    return att
+
+
+def _attachments(msg: Message, leaves: list[_Leaf], used: set[int], depth: int) -> list[_Att]:
+    return [att for lf in leaves if id(lf.part) not in used and lf.text is None
+            for att in [_classify(lf, depth)] if att.kind != "ignore"]
+
+
+def parse(data: bytes) -> Message:
+    return BytesParser(policy=policy.default).parsebytes(data)
+
+
+def _encrypted(msg: Message) -> bool:
+    return msg.get_content_type() in _ENCRYPTED_TYPES
+
+
+def attachment_shas(data: bytes, depth: int = 0) -> list[str]:
+    """SHA-256 der Anhänge, deren Seiten sich von gleichem Inhalt übernehmen lassen (PDF, Bild, Word) –
+    auch in angehängten Mails. Billig (nur Zerlegen, keine Texterkennung): der Hauptprozess sucht damit
+    vor dem Einlesen schon bekannte Seiten."""
+    try:
+        msg = parse(data)
+        leaves = _leaves(msg)
+        _, used = _body_text(msg, leaves)
+        atts = _attachments(msg, leaves, used, depth)
+    except Exception:
+        return []
+    out: list[str] = []
+    for att in atts:
+        if att.kind in REUSABLE_KINDS:
+            out.append(att.sha)
+        elif att.kind == "mail":
+            out.extend(attachment_shas(att.data, depth + 1))
+    return out
+
+
+def _resolve(msg: Message, seg: str) -> Message | None:
+    if not seg:
+        return msg
+    if not msg.is_multipart():
+        return msg if seg == "1" else None
+    part = msg
+    for idx in seg.split("."):
+        if not idx.isdigit() or not part.is_multipart() or part.get_content_type() == "message/rfc822":
+            return None
+        kids = part.get_payload()
+        i = int(idx) - 1
+        if not 0 <= i < len(kids):
+            return None
+        part = kids[i]
+    return part
+
+
+def find_part(data: bytes, mime_path: str) -> bytes | None:
+    """Inhalt (dekodiert) des Teils an mime_path (parts.mime_path) – zum Öffnen eines Anhangs.
+    None, wenn es ihn nicht gibt. Vor dem Öffnen die sha256 mit parts.sha256 vergleichen."""
+    try:
+        msg = parse(data)
+        segs = mime_path.split("/")
+        for n, seg in enumerate(segs):
+            part = _resolve(msg, seg)
+            if part is None:
+                return None
+            if n == len(segs) - 1:
+                return _classify(_Leaf(part, seg), 0).data
+            msg = part.get_payload(0) if part.get_content_type() == "message/rfc822" else parse(_payload(part))
+    except Exception:
+        return None
+    return None
+
+
+# --- Einlesen ------------------------------------------------------------------------------------------
+
+@dataclass
+class _Ctx:
+    engine: object
+    known: dict
+    safe: bool
+    notes: list[str]
+    pages: list[PageText] = field(default_factory=list)
+    parts: list[PartInfo] = field(default_factory=list)
+    seen: dict[str, int] = field(default_factory=dict)     # sha256 -> part_no innerhalb dieser Mail
+    overflow: int = 0
+    page_limit_hit: bool = False
+    reused_ocr: int = 0
+    skipped_safe: int = 0
+
+    def add_part(self, att: _Att, kind: str, pages: list[PageText], note: str | None, prefix: str,
+                 name: str | None = None) -> PartInfo:
+        first = len(self.pages) + 1 if pages else None
+        for p in pages:
+            self.pages.append(PageText(len(self.pages) + 1, p.text, p.source, p.ocr_conf))
+        info = PartInfo(part_no=len(self.parts), kind=kind, first_page=first, n_pages=len(pages),
+                        name=name if name is not None else (att.name or None), mime=att.mime,
+                        size=len(att.data), sha256=att.sha if att.data else None,
+                        mime_path=prefix + att.path, note=note)
+        self.parts.append(info)
+        return info
+
+
+class _Folder:
+    """Dateien im Vorgangsordner (Elternordner von Emails/) für die DOMUS-Platzhalter – nur gelesen."""
+
+    def __init__(self, mail_path: Path, root: str | None):
+        d = mail_path.parent
+        self.dir = d.parent if d.name.casefold() == "emails" else d
+        self.root = root
+        self._names: dict[str, str] | None = None
+
+    def find(self, name: str) -> str | None:
+        if self._names is None:
+            self._names = {}
+            try:
+                with os.scandir(self.dir) as it:
+                    for e in it:
+                        if e.name.startswith(".") or not e.is_file(follow_symlinks=False):
+                            continue
+                        self._names.setdefault(unicodedata.normalize("NFC", e.name).casefold(), e.name)
+            except OSError:
+                pass
+        hit = self._names.get(unicodedata.normalize("NFC", name).casefold())
+        if hit is None:
+            return None
+        full = os.path.join(self.dir, hit)
+        base = self.root if self.root else str(self.dir)
+        try:
+            return os.path.relpath(full, base)
+        except ValueError:
+            return full
+
+
+def _read_attachment(att: _Att, ctx: _Ctx, depth: int, prefix: str, folder: _Folder) -> None:
+    if len(ctx.parts) - 1 >= MAX_MAIL_PARTS:
+        ctx.overflow += 1
+        return
+    if att.kind == "link":
+        ctx.add_part(att, "link", [], folder.find(att.link), prefix, name=att.link)
+        return
+    if att.kind not in EVALUATED_KINDS:
+        ctx.add_part(att, "skipped", [], att.note or NOT_EVALUATED, prefix)
+        return
+    sha = att.sha
+    if sha in ctx.seen:
+        if not (att.inline and att.kind == "image"):
+            ctx.add_part(att, att.kind, [], f"gleicher Inhalt wie Anhang {ctx.seen[sha]}", prefix)
+        return
+    room = MAX_MAIL_PAGES - len(ctx.pages)
+    if room <= 0:
+        ctx.page_limit_hit = True
+        ctx.add_part(att, att.kind, [], f"{NOT_EVALUATED} (Seitenlimit der Mail erreicht)", prefix)
+        return
+    if att.kind == "mail":
+        info = _read_nested(att, ctx, depth + 1, prefix, folder)
+        ctx.seen.setdefault(sha, info.part_no)
+        return
+    known = ctx.known.get(sha) if att.kind in REUSABLE_KINDS else None
+    note = None
+    pages: list[PageText] = []
+    if known:
+        pages = known[:room]
+        note = REUSED_NOTE
+        ctx.reused_ocr += sum(1 for p in pages if p.source != "text")
+    elif ctx.safe and att.kind in ("pdf", "image"):
+        ctx.skipped_safe += 1
+        note = SAFE_NOTE
+    else:
+        sub: list[str] = []
+        try:
+            if att.kind == "pdf":
+                pages = extract_pdf(att.data, ctx.engine, max_pages=room, notes=sub)
+            elif att.kind == "image":
+                pages = extract_image_bytes(att.data, ctx.engine, sub, max_pages=room)
+            elif att.kind == "word":
+                from .word import word_pages
+                pages = word_pages(att.data, sub)[:room]
+            else:   # text
+                t = _decode_bytes(att.data, att.part.get_content_charset())
+                if att.mime == "text/html" or att.name.lower().endswith((".htm", ".html")):
+                    t = html_to_text(t)
+                pages = [PageText(1, t.replace("\r\n", "\n").replace("\r", "\n").strip(), "text")]
+        except ExtractError as e:
+            note = str(e)
+            pages = []
+        except MemoryError:
+            raise
+        except Exception as e:      # z. B. Pillow DecompressionBombError: nur dieser Anhang fehlt
+            note = f"nicht lesbar ({type(e).__name__})"
+            pages = []
+        if sub:
+            extra = "; ".join(n[len(NOTE_PREFIX):].strip() if n.startswith(NOTE_PREFIX) else n for n in sub)
+            note = f"{note}; {extra}" if note else extra
+    info = ctx.add_part(att, att.kind, pages, note, prefix)
+    ctx.seen[sha] = info.part_no
+
+
+def _read_message(msg: Message, ctx: _Ctx, depth: int, prefix: str, folder: _Folder,
+                  mtime: float | None) -> tuple[_Head, str, list[_Att]]:
+    head = read_head(msg, mtime)
+    if _encrypted(msg):
+        ctx.notes.append(f"{NOTE_PREFIX} E-Mail ist verschlüsselt (S/MIME) – nur der Kopf ist durchsuchbar")
+        return head, "", []
+    leaves = _leaves(msg)
+    body, used = _body_text(msg, leaves)
+    atts = _attachments(msg, leaves, used, depth)
+    lines = list(head.lines)
+    names = [a.name for a in atts if a.kind != "link" and a.name]
+    if names:
+        lines.append("Anhänge: " + ", ".join(dict.fromkeys(names)))
+    for a in atts:
+        if a.kind == "link":
+            lines.append(f"Anhang in DOMUS abgelegt: {a.link}")
+    text = "\n".join(lines) + ("\n\n" + body if body else "")
+    return head, text, atts
+
+
+def _read_nested(att: _Att, ctx: _Ctx, depth: int, prefix: str, folder: _Folder) -> PartInfo:
+    """Angehängte Mail: eigene Seite (Kopf + Text), danach ihre Anhänge als weitere Teile."""
+    try:
+        inner = parse(att.data)
+        sub_prefix = f"{prefix}{att.path}/"
+        _, text, atts = _read_message(inner, ctx, depth, sub_prefix, folder, None)
+    except Exception as e:
+        return ctx.add_part(att, "mail", [], f"nicht lesbar ({type(e).__name__})", prefix)
+    info = ctx.add_part(att, "mail", [PageText(1, "Weitergeleitete Mail\n" + text, "text")], None, prefix)
+    _page_done()
+    for a in atts:
+        _read_attachment(a, ctx, depth, sub_prefix, folder)
+        a.data = b""
+        _page_done()
+    return info
+
+
+def extract_mail(path: Path, engine, *, known: dict | None = None, safe: bool = False,
+                 root: str | None = None) -> Extracted:
+    """E-Mail einlesen (siehe Modulbeschreibung). Originale werden nur gelesen."""
+    path = Path(path)
+    st = os.stat(path)
+    notes: list[str] = []
+    ctx = _Ctx(engine, known or {}, safe, notes)
+    folder = _Folder(path, root)
+    if st.st_size == 0:
+        notes.append(f"{NOTE_PREFIX} leere Datei (0 Byte)")
+        ctx.pages.append(PageText(1, "", "text"))
+        ctx.parts.append(PartInfo(0, "body", 1, 1, mime="message/rfc822", size=0))
+        return Extracted(ctx.pages, notes, ctx.parts, MailInfo())
+    if st.st_size > MAX_MAIL_BYTES:
+        with open(path, "rb") as f:
+            msg = BytesHeaderParser(policy=policy.default).parsebytes(f.read(1 << 20))
+        head = read_head(msg, st.st_mtime)
+        notes.append(f"{NOTE_PREFIX} E-Mail zu groß ({st.st_size // (1024 * 1024)} MB) – nur der Kopf eingelesen")
+        ctx.pages.append(PageText(1, "\n".join(head.lines), "text"))
+        ctx.parts.append(PartInfo(0, "body", 1, 1, mime="message/rfc822", size=st.st_size))
+        return Extracted(ctx.pages, notes, ctx.parts, head.info)
+    with open(path, "rb") as f:
+        data = f.read()
+    msg = parse(data)
+    head, text, atts = _read_message(msg, ctx, 0, "", folder, st.st_mtime)
+    ctx.pages.append(PageText(1, text, "text"))
+    ctx.parts.append(PartInfo(0, "body", 1, 1, mime="message/rfc822", size=len(data), mime_path=""))
+    del data
+    _page_done()
+    for att in atts:
+        _read_attachment(att, ctx, 0, "", folder)
+        att.data = b""                    # Speicher sofort freigeben (große Anhänge)
+        _page_done()
+    if ctx.overflow:
+        notes.append(f"{NOTE_PREFIX} nur die ersten {MAX_MAIL_PARTS} Anhänge ausgewertet "
+                     f"({ctx.overflow} weitere nicht)")
+    if ctx.page_limit_hit:
+        notes.append(f"{NOTE_PREFIX} Seitenlimit der Mail ({MAX_MAIL_PAGES} Seiten) erreicht – "
+                     "weitere Anhänge nicht eingelesen")
+    if safe and ctx.skipped_safe:
+        notes.append(SAFE_MAIL_NOTE)
+    return Extracted(ctx.pages, notes, ctx.parts, head.info, reused_ocr_pages=ctx.reused_ocr)

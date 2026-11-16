@@ -7,6 +7,8 @@
   Verschwindet er mitten im Lauf, wird angehalten; die offenen Dateien bleiben offen.
 - Verschobene oder doppelte Dateien werden am Inhalt (SHA-256) erkannt und nicht neu erkannt (OCR).
   Der alte Eintrag einer umbenannten oder verschobenen Datei wird danach entfernt (prune_renamed).
+- E-Mail-Anhänge, deren Inhalt schon als Datei oder als Anhang einer anderen Mail eingelesen ist, werden
+  ebenfalls nicht neu erkannt: der Hauptprozess sucht ihre Seiten vorab (_known_pages).
 """
 from __future__ import annotations
 
@@ -22,7 +24,8 @@ from pathlib import Path
 from typing import IO, Callable
 
 from . import db as dbm
-from .extract import IMAGE_EXT, NOTE_PREFIX, PDF_EXT, ExtractError, PageText, extract_with_notes
+from .extract import (IMAGE_EXT, MAIL_EXT, NOTE_PREFIX, PDF_EXT, WORD_EXT, Extracted, ExtractError, MailInfo, PageText,
+                      PartInfo, extract_full, extract_with_notes)
 
 IGNORED_DIRS = {
     ".Spotlight-V100", ".Trashes", ".fseventsd", ".TemporaryItems", ".DocumentRevisions-V100",
@@ -31,7 +34,7 @@ IGNORED_DIRS = {
 IGNORED_FILES = {"Thumbs.db", "desktop.ini", "Icon\r"}
 MAX_ATTEMPTS = 3
 MISSING_SAFETY_RATIO = 0.5   # mehr als die Hälfte verschwunden? -> vermutlich falscher/leerer Ordner
-PERMANENT_ERRORS = ("PDF ist passwortgeschützt",)   # hier hilft Wiederholen nicht
+PERMANENT_ERRORS = ("PDF ist passwortgeschützt", "Word-Datei ist passwortgeschützt")   # Wiederholen hilft nicht
 MOVED_SAMPLE = 50            # Stichprobe, um einen umgezogenen Ordner (umbenannte SSD) zu erkennen …
 MOVED_MIN_RATIO = 0.8        # … so viel davon muss am neuen Ort liegen
 BUMP_EVERY_FILES = 50        # laufende Suchserver sehen Neues spätestens nach so vielen Dateien …
@@ -51,7 +54,15 @@ def kind_for(ext: str) -> str:
         return "pdf"
     if ext in IMAGE_EXT:
         return "image"
+    if ext in MAIL_EXT:
+        return "mail"
+    if ext in WORD_EXT:
+        return "word"
     return "unsupported"
+
+
+def _is_mail(r) -> bool:
+    return os.path.splitext(r["relpath"])[1].lower() in MAIL_EXT
 
 
 # --- eingelesene Ordner ------------------------------------------------------------------
@@ -249,6 +260,7 @@ class ScanStats:
     missing_held_back: int = 0
     renamed: int = 0             # … davon (oder von früher) nach dem Verarbeiten als umbenannt/verschoben erkannt
     unsupported: int = 0
+    reactivated: int = 0         # bisher „nicht unterstützt“, jetzt lesbar (E-Mail, Word) -> wieder offen
     dir_errors: list[str] = field(default_factory=list)
     _held_back_paths: set[str] = field(default_factory=set, repr=False)
 
@@ -270,7 +282,7 @@ def scan_root(con, root_id: int, root_path: str, confirm_missing: bool = False,
         return st_
     now = time.time()
     known = {r["relpath"]: r for r in con.execute(
-        "SELECT id, relpath, size, mtime, status FROM files WHERE root_id = ?", (root_id,))}
+        "SELECT id, relpath, kind, size, mtime, status FROM files WHERE root_id = ?", (root_id,))}
     seen: set[str] = set()
     error_dirs: list[str] = []
 
@@ -317,13 +329,18 @@ def scan_root(con, root_id: int, root_path: str, confirm_missing: bool = False,
                     con.execute("UPDATE files SET size=?, mtime=?, status='skipped', seen_at=? WHERE id=?",
                                 (s.st_size, s.st_mtime, now, row["id"]))
                     st_.unsupported += 1
+                elif row["status"] == "skipped":
+                    # früher nicht unterstützt (E-Mail, Word), jetzt lesbar: auch unverändert wieder einlesen
+                    con.execute("UPDATE files SET kind=?, size=?, mtime=?, status='pending', attempts=0, error=NULL,"
+                                " seen_at=? WHERE id=?", (kind, s.st_size, s.st_mtime, now, row["id"]))
+                    st_.reactivated += 1
                 elif row["status"] == "missing":
-                    con.execute(f"UPDATE files SET size=?, mtime=?, status='pending', attempts=0, {_KEEP_NOTE},"
-                                " seen_at=? WHERE id=?", (s.st_size, s.st_mtime, now, row["id"]))
+                    con.execute(f"UPDATE files SET kind=?, size=?, mtime=?, status='pending', attempts=0, {_KEEP_NOTE},"
+                                " seen_at=? WHERE id=?", (kind, s.st_size, s.st_mtime, now, row["id"]))
                     st_.restored += 1
                 elif changed:
-                    con.execute(f"UPDATE files SET size=?, mtime=?, status='pending', attempts=0, {_KEEP_NOTE},"
-                                " seen_at=? WHERE id=?", (s.st_size, s.st_mtime, now, row["id"]))
+                    con.execute(f"UPDATE files SET kind=?, size=?, mtime=?, status='pending', attempts=0, {_KEEP_NOTE},"
+                                " seen_at=? WHERE id=?", (kind, s.st_size, s.st_mtime, now, row["id"]))
                     st_.changed += 1
                 else:
                     con.execute("UPDATE files SET seen_at=? WHERE id=?", (now, row["id"]))
@@ -376,20 +393,113 @@ def sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
-def _write_pages(con, file_id: int, relpath: str, pages: list[PageText]) -> None:
+def _nfc(s: str | None) -> str | None:
+    return unicodedata.normalize("NFC", s) if s else s
+
+
+def _write_pages(con, file_id: int, relpath: str, res: Extracted | list[PageText]) -> None:
+    """Seiten, bei E-Mails auch Teile und Mailkopf, einer Datei ersetzen und den Suchindex neu schreiben."""
+    if not isinstance(res, Extracted):
+        res = Extracted(res)
     _delete_fts_for_file(con, file_id)
     con.execute("DELETE FROM pages WHERE file_id = ?", (file_id,))
-    for p in pages:
+    con.execute("DELETE FROM parts WHERE file_id = ?", (file_id,))
+    con.execute("DELETE FROM mails WHERE file_id = ?", (file_id,))
+    for p in res.pages:
         text = unicodedata.normalize("NFC", p.text)   # zerlegte Umlaute (u + ¨) aus PDF-Textebenen zusammenfügen
         con.execute("INSERT INTO pages(file_id, page_no, text, source, ocr_conf) VALUES (?, ?, ?, ?, ?)",
                     (file_id, p.page_no, text, p.source, p.ocr_conf))
+    for t in res.parts:
+        con.execute("INSERT INTO parts(file_id, part_no, first_page, n_pages, kind, name, mime, size, sha256,"
+                    " mime_path, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (file_id, t.part_no, t.first_page, t.n_pages, t.kind, _nfc(t.name), t.mime, t.size, t.sha256,
+                     t.mime_path, _nfc(t.note)))
+    if res.mail is not None:
+        m = res.mail
+        con.execute("INSERT INTO mails(file_id, subject, sender, recipients, sent_at, message_id)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (file_id, _nfc(m.subject), _nfc(m.sender), _nfc(m.recipients), m.sent_at, m.message_id))
     dbm.index_file_text(con, file_id, relpath)
 
 
-def _pages_of(con, file_id: int) -> list[PageText]:
-    return [PageText(r["page_no"], r["text"], r["source"], r["ocr_conf"])
-            for r in con.execute("SELECT page_no, text, source, ocr_conf FROM pages WHERE file_id = ? ORDER BY page_no",
-                                 (file_id,))]
+def _pages_of(con, file_id: int, first: int | None = None, last: int | None = None) -> list[PageText]:
+    """Seiten einer Datei; mit first/last nur dieser Bereich, dann ab 1 neu nummeriert (Anhang einer Mail)."""
+    if first is None:
+        rows = con.execute("SELECT page_no, text, source, ocr_conf FROM pages WHERE file_id = ? ORDER BY page_no",
+                           (file_id,))
+        return [PageText(r["page_no"], r["text"], r["source"], r["ocr_conf"]) for r in rows]
+    rows = con.execute("SELECT page_no, text, source, ocr_conf FROM pages WHERE file_id = ? AND page_no BETWEEN ? AND ?"
+                       " ORDER BY page_no", (file_id, first, last))
+    return [PageText(i, r["text"], r["source"], r["ocr_conf"]) for i, r in enumerate(rows, 1)]
+
+
+def _parts_of(con, file_id: int) -> list[PartInfo]:
+    return [PartInfo(r["part_no"], r["kind"], r["first_page"], r["n_pages"], r["name"], r["mime"], r["size"],
+                     r["sha256"], r["mime_path"], r["note"])
+            for r in con.execute("SELECT * FROM parts WHERE file_id = ? ORDER BY part_no", (file_id,))]
+
+
+def _mail_of(con, file_id: int) -> MailInfo | None:
+    r = con.execute("SELECT * FROM mails WHERE file_id = ?", (file_id,)).fetchone()
+    return None if r is None else MailInfo(r["subject"], r["sender"], r["recipients"], r["sent_at"], r["message_id"])
+
+
+def _stored(con, file_id: int) -> Extracted:
+    """Gespeicherter Stand einer Datei (Seiten, Hinweis, Teile, Mailkopf) – zum Übernehmen bei gleichem Inhalt."""
+    note = _note_of(con, file_id)
+    return Extracted(_pages_of(con, file_id), [note] if note else [], _parts_of(con, file_id), _mail_of(con, file_id))
+
+
+REUSE_KINDS = ("pdf", "image", "word")    # Anhänge, deren Seiten sich 1:1 von gleichem Inhalt übernehmen lassen
+
+
+def _pages_for_sha(con, sha: str) -> list[PageText] | None:
+    """Seiten eines schon eingelesenen Inhalts: als eigene Datei oder als Anhang einer fertigen Mail."""
+    row = con.execute(
+        "SELECT f.id FROM files f WHERE f.sha256 = ? AND f.status IN ('done', 'missing') AND f.kind IN (?, ?, ?)"
+        " AND EXISTS (SELECT 1 FROM pages p WHERE p.file_id = f.id) LIMIT 1", (sha, *REUSE_KINDS)).fetchone()
+    if row:
+        return _pages_of(con, row[0])
+    from .mail import REUSED_NOTE
+    # nur vollständig gelesene Anhänge (ohne Hinweis wie „nur die ersten … Seiten“)
+    row = con.execute(
+        "SELECT t.file_id, t.first_page, t.n_pages FROM parts t JOIN files f ON f.id = t.file_id"
+        " WHERE t.sha256 = ? AND t.n_pages > 0 AND t.first_page IS NOT NULL AND t.kind IN (?, ?, ?)"
+        " AND (t.note IS NULL OR t.note = ?) AND f.status = 'done' LIMIT 1", (sha, *REUSE_KINDS, REUSED_NOTE)).fetchone()
+    if row:
+        pages = _pages_of(con, row[0], row[1], row[1] + row[2] - 1)
+        if len(pages) == row[2]:
+            return pages
+    return None
+
+
+def _pages_as_attachment(con, sha: str) -> list[PageText] | None:
+    """Seiten einer Datei, deren Inhalt schon als Anhang einer fertigen Mail eingelesen ist."""
+    try:
+        if not con.execute("SELECT 1 FROM parts WHERE sha256 = ? LIMIT 1", (sha,)).fetchone():
+            return None
+        return _pages_for_sha(con, sha)
+    except sqlite3.OperationalError:
+        return None
+
+
+def _known_pages(con, full: str) -> dict[str, list[PageText]]:
+    """E-Mail: Seiten der Anhänge, deren Inhalt schon eingelesen ist (sha256 -> Seiten). Der Arbeitsprozess
+    übernimmt sie statt erneuter Texterkennung. Nur ein Vorabblick: Fehler hier verhindern nichts."""
+    from .mail import MAX_MAIL_BYTES, attachment_shas
+    try:
+        if os.path.getsize(full) > MAX_MAIL_BYTES:
+            return {}
+        with open(full, "rb") as f:
+            data = f.read()
+        known = {}
+        for sha in dict.fromkeys(attachment_shas(data)):
+            pages = _pages_for_sha(con, sha)
+            if pages:
+                known[sha] = pages
+        return known
+    except (OSError, ValueError, sqlite3.Error):
+        return {}
 
 
 def _note_of(con, file_id: int) -> str | None:
@@ -469,7 +579,8 @@ def _file_signature(s: os.stat_result) -> tuple:
 def _prepare(con, r):
     """Markiert die Datei als 'in Arbeit', berechnet den Hash und prüft, ob der Text schon bekannt ist.
 
-    Rückgabe: (stat, sha256, pages oder None, übernommen?, Hinweis oder None)
+    Rückgabe: (stat, sha256, Extracted oder None, übernommen?, bekannte Anhangseiten (nur E-Mails) oder None).
+    Bei gleichem Inhalt werden auch Teile und Mailkopf übernommen.
     """
     fid = r["id"]
     con.execute("UPDATE files SET status='processing', attempts=attempts+1 WHERE id=?", (fid,))
@@ -478,13 +589,34 @@ def _prepare(con, r):
     s = os.stat(full)
     sha = sha256_file(full)
     if r["sha256"] == sha and con.execute("SELECT 1 FROM pages WHERE file_id=? LIMIT 1", (fid,)).fetchone():
-        return s, sha, _pages_of(con, fid), True, _note_of(con, fid)
+        return s, sha, _stored(con, fid), True, None
     src = con.execute(
         "SELECT f.id FROM files f WHERE f.sha256 = ? AND f.id != ? AND f.status IN ('done', 'missing')"
         " AND EXISTS (SELECT 1 FROM pages p WHERE p.file_id = f.id) LIMIT 1", (sha, fid)).fetchone()
     if src:
-        return s, sha, _pages_of(con, src[0]), True, _note_of(con, src[0])
+        return s, sha, _stored(con, src[0]), True, None
+    if _is_mail(r):
+        return s, sha, None, False, _known_pages(con, full)
+    if pages := _pages_as_attachment(con, sha):
+        return s, sha, Extracted(pages), True, None       # Inhalt schon als Mail-Anhang eingelesen
     return s, sha, None, False, None
+
+
+def _row_get(r, key: str, default=None):
+    return r[key] if key in r.keys() else default
+
+
+def _safe_mode(r) -> bool:
+    """E-Mail beim letzten Versuch (nach Abstürzen) oder nach Zeitlimit: nur Mailtext, ohne PDF-/Bild-Anhänge."""
+    return _is_mail(r) and bool(_row_get(r, "safe") or (r["attempts"] or 0) >= MAX_ATTEMPTS - 1)
+
+
+def _extract_local(r, engine, known) -> Extracted:
+    path = Path(r["root"], r["relpath"])
+    if _is_mail(r):
+        return extract_full(path, engine, known=known, safe=_safe_mode(r), root=r["root"])
+    pages, notes = extract_with_notes(path, engine)
+    return Extracted(pages, notes)
 
 
 class _Progress:
@@ -512,12 +644,16 @@ class _Progress:
         self.unbumped = 0
         self.t_bump = time.time()
 
-    def finish(self, r, s, sha, pages: list[PageText], reused: bool, t0: float, note: str | None = None):
+    def finish(self, r, s, sha, res: Extracted, reused: bool, t0: float):
         con, ps = self.con, self.ps
         current = os.stat(os.path.join(r["root"], r["relpath"]), follow_symlinks=False)
         if not stat.S_ISREG(current.st_mode) or _file_signature(current) != _file_signature(s):
             raise _ChangedDuringRead
-        _write_pages(con, r["id"], r["relpath"], pages)
+        if not isinstance(res, Extracted):
+            res = Extracted(*res)
+        pages = res.pages
+        note = "; ".join(res.notes) or None
+        _write_pages(con, r["id"], r["relpath"], res)
         ocr_pages = sum(1 for p in pages if p.source != "text")
         confs = [p.ocr_conf for p in pages if p.ocr_conf is not None]
         chars = sum(len(p.text.strip()) for p in pages)
@@ -531,8 +667,12 @@ class _Progress:
         ps.done += 1
         ps.reused += reused
         ps.pages += len(pages)
-        ps.ocr_pages += 0 if reused else ocr_pages
+        ps.ocr_pages += 0 if reused else max(0, ocr_pages - res.reused_ocr_pages)
         info = "übernommen (gleicher Inhalt schon bekannt)" if reused else f"{len(pages)} S., {ocr_pages} per OCR"
+        if not reused and res.mail is not None:
+            n_att = len(res.parts) - 1
+            if n_att > 0:
+                info += f", {n_att} Anhang" if n_att == 1 else f", {n_att} Anhänge"
         if chars == 0:
             info += ", KEIN TEXT"
         if note:
@@ -582,8 +722,12 @@ class _Progress:
 def _todo(con, ps: ProcessStats, limit: int | None, root_ids: list[int] | None = None):
     scope, args = _root_scope(root_ids, "f.root_id")
     rows = con.execute(
-        "SELECT f.id, f.relpath, f.sha256, f.attempts, r.path AS root FROM files f JOIN roots r ON r.id = f.root_id"
-        " WHERE f.status = 'pending'" + scope + " ORDER BY r.id, f.relpath", args).fetchall()
+        "SELECT f.id, f.relpath, f.kind, f.sha256, f.attempts, r.path AS root FROM files f"
+        " JOIN roots r ON r.id = f.root_id"
+        # E-Mails zuletzt: ihre Anhänge liegen oft auch als Datei im Vorgangsordner – deren Seiten werden dann
+        # übernommen statt erneut erkannt
+        " WHERE f.status = 'pending'" + scope + " ORDER BY r.id, coalesce(f.kind, '') = 'mail', f.relpath",
+        args).fetchall()
     online: dict[str, bool] = {}
     todo = []
     for r in rows:
@@ -627,11 +771,10 @@ def _process_sequential(con, todo, engine, prog: _Progress) -> None:
             try:
                 if _root_gone(r["root"]):
                     raise _RootLost(r["root"])
-                s, sha, pages, reused, note = _prepare(con, r)
-                if pages is None:
-                    pages, notes = extract_with_notes(Path(r["root"], r["relpath"]), engine)
-                    note = "; ".join(notes) or None
-                prog.finish(r, s, sha, pages, reused, t0, note)
+                s, sha, res, reused, known = _prepare(con, r)
+                if res is None:
+                    res = _extract_local(r, engine, known)
+                prog.finish(r, s, sha, res, reused, t0)
             except KeyboardInterrupt:
                 prog.back_to_pending(r)
                 prog.stop("Unterbrochen. Beim nächsten Start geht es mit dieser Datei weiter.")
@@ -660,13 +803,17 @@ def _init_worker(engine_name: str) -> None:
     _WORKER_ENGINE = make_engine(engine_name)
 
 
-def _extract_job(path: str, marker: str | None = None,
-                 stall_timeout: float | None = None) -> tuple[list[PageText], list[str]]:
+def _extract_job(path: str, marker: str | None = None, stall_timeout: float | None = None,
+                 known: dict | None = None, safe: bool = False, root: str | None = None) -> Extracted:
+    """Eine Datei im Arbeitsprozess einlesen. Das Ergebnis lässt sich wie bisher als (pages, notes) entpacken."""
     crash_on = os.environ.get("BELEGSUCHE_TEST_CRASH_ON")   # nur für Tests: harten Absturz simulieren
-    if crash_on and path.endswith(crash_on):
+    if crash_on and path.endswith(crash_on) and not (safe and os.environ.get("BELEGSUCHE_TEST_CRASH_SAFE_OK")):
         os._exit(1)
+
+    def run() -> Extracted:
+        return extract_full(Path(path), _WORKER_ENGINE, known=known, safe=safe, root=root)
     if not marker or not stall_timeout:
-        return extract_with_notes(Path(path), _WORKER_ENGINE)
+        return run()
     import faulthandler
     from . import extract as extract_mod
     # Hängt pdfium oder Vision im C-Code, kommt Python selbst nicht mehr zum Zug. Der Wächter-Thread von
@@ -680,10 +827,10 @@ def _extract_job(path: str, marker: str | None = None,
         arm()
         extract_mod.on_page_done = arm
         hang_on = os.environ.get("BELEGSUCHE_TEST_HANG_ON")   # nur für Tests: Hänger in C-Code simulieren
-        if hang_on and path.endswith(hang_on):
+        if hang_on and path.endswith(hang_on) and not safe:
             import ctypes
             ctypes.PyDLL(None).sleep(3600)   # blockiert wie ein hängender Bibliotheksaufruf (hält den GIL)
-        return extract_with_notes(Path(path), _WORKER_ENGINE)
+        return run()
     finally:
         faulthandler.cancel_dump_traceback_later()
         extract_mod.on_page_done = None
@@ -778,9 +925,9 @@ def _process_parallel_run(con, todo, engine_name: str, workers: int, prog: _Prog
                     raise _RootLost(r["root"])
                 current, t0 = r, time.time()
                 try:
-                    s, sha, pages, reused, note = _prepare(con, r)
-                    if pages is not None:
-                        prog.finish(r, s, sha, pages, reused, t0, note)
+                    s, sha, res, reused, known = _prepare(con, r)
+                    if res is not None:
+                        prog.finish(r, s, sha, res, reused, t0)
                         current = None
                         continue
                 except Exception as e:
@@ -792,7 +939,8 @@ def _process_parallel_run(con, todo, engine_name: str, workers: int, prog: _Prog
                     current = None
                     deferred.append(r)
                     continue
-                fut = pool.submit(_extract_job, os.path.join(r["root"], r["relpath"]), marker(r), STALL_TIMEOUT)
+                fut = pool.submit(_extract_job, os.path.join(r["root"], r["relpath"]), marker(r), STALL_TIMEOUT,
+                                  known, _safe_mode(r), r["root"])
                 inflight[fut] = (r, s, sha, t0)
                 current = None
                 inflight_sha.add(sha)
@@ -814,8 +962,7 @@ def _process_parallel_run(con, todo, engine_name: str, workers: int, prog: _Prog
                 r, s, sha, t0 = inflight.pop(fut)
                 inflight_sha.discard(sha)
                 try:
-                    pages, notes = fut.result()
-                    prog.finish(r, s, sha, pages, False, t0, "; ".join(notes) or None)
+                    prog.finish(r, s, sha, fut.result(), False, t0)
                 except BrokenProcessPool:
                     crashed.append(r)
                 except Exception as e:
@@ -833,9 +980,16 @@ def _process_parallel_run(con, todo, engine_name: str, workers: int, prog: _Prog
                     raise _RootLost(crashed[0]["root"])   # SSD weg: die Dateien sind nicht schuld
                 hung = {r["id"] for r in crashed if _timed_out(marker(r))}
                 if hung:
-                    # Schuldige Datei(en) bekannt: nur sie als Fehler, die übrigen ohne Versuch zurück in die Reihe
+                    # Schuldige Datei(en) bekannt: nur sie als Fehler, die übrigen ohne Versuch zurück in die Reihe.
+                    # Eine E-Mail bekommt noch einen Versuch nur mit dem Mailtext (ohne PDF-/Bild-Anhänge).
                     for r in crashed:
-                        if r["id"] in hung:
+                        if r["id"] in hung and _is_mail(r) and not _safe_mode(r):
+                            con.execute("UPDATE files SET status='pending' WHERE id=?", (r["id"],))
+                            con.commit()
+                            solo.append(dict(r) | {"safe": True})
+                            prog.log(f"   {r['relpath']} – Zeitlimit beim Lesen der Anhänge, "
+                                     "wird nur mit dem Mailtext eingelesen")
+                        elif r["id"] in hung:
                             prog.fail(r, ExtractError(_timeout_msg()))
                     for r in reversed([r for r in crashed if r["id"] not in hung]):
                         prog.back_to_pending(r)
@@ -945,6 +1099,8 @@ def run_index(con, folders: list[str], engine_name: str = "apple", confirm_missi
         if s.online:
             log(f"{s.root}: {s.seen} Dateien – {s.new} neu, {s.changed} geändert, {s.restored} wieder da, "
                 f"{s.missing} fehlen, {s.unsupported} nicht unterstützt")
+            if s.reactivated:
+                log(f"   {s.reactivated} bisher nicht unterstützte Dateien (E-Mail, Word) werden jetzt eingelesen")
         for e in s.dir_errors[:10]:
             log(f"   nicht lesbar: {e}")
     scope = ids if folders else None

@@ -1,24 +1,28 @@
-"""Text aus PDFs und Bildern holen – pro Seite, mit OCR wo nötig.
+"""Text aus PDFs, Bildern, Word-Dateien und E-Mails holen – pro Seite, mit OCR wo nötig.
 
-Originale werden nur gelesen, nie geschrieben.
+Originale werden nur gelesen, nie geschrieben. PDFs und Bilder lassen sich auch aus Bytes lesen
+(Mail-Anhänge), ohne Zwischendatei neben dem Original.
 """
 from __future__ import annotations
 
 import ctypes
+import io
 import math
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
 from PIL import Image, ImageOps
 
-from .ocr import ImageFormatError, OcrResult, enhance, load_image, to_rgb
+from .ocr import ImageFormatError, OcrResult, enhance, load_image, load_image_bytes, to_rgb
 
 PDF_EXT = {".pdf"}
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".heic", ".heif", ".bmp", ".gif", ".webp"}
-SUPPORTED_EXT = PDF_EXT | IMAGE_EXT
+MAIL_EXT = {".eml"}
+WORD_EXT = {".doc", ".docx", ".dot", ".dotx", ".dotm", ".rtf", ".odt"}
+SUPPORTED_EXT = PDF_EXT | IMAGE_EXT | MAIL_EXT | WORD_EXT
 
 OCR_DPI = 300
 MAX_RENDER_PX = 5000          # längste Bildseite beim Rendern von PDF-Seiten
@@ -55,6 +59,46 @@ class PageText:
     text: str
     source: str               # text | ocr | text+ocr
     ocr_conf: float | None = None
+
+
+@dataclass
+class PartInfo:
+    """Ein Teil einer E-Mail (Tabelle parts): 0 = Mailkopf + Mailtext, danach die Anhänge."""
+    part_no: int
+    kind: str                 # body | pdf | image | word | text | mail | link | skipped
+    first_page: int | None = None
+    n_pages: int = 0
+    name: str | None = None
+    mime: str | None = None
+    size: int | None = None
+    sha256: str | None = None
+    mime_path: str | None = None
+    note: str | None = None
+
+
+@dataclass
+class MailInfo:
+    """Kopf einer E-Mail (Tabelle mails)."""
+    subject: str | None = None
+    sender: str | None = None
+    recipients: str | None = None
+    sent_at: str | None = None        # ISO 8601
+    message_id: str | None = None
+
+
+@dataclass
+class Extracted:
+    """Ergebnis des Einlesens einer Datei: Seiten, Hinweise und bei E-Mails Teile und Mailkopf.
+
+    Lässt sich zwischen Prozessen übertragen und wie bisher als (pages, notes) entpacken."""
+    pages: list[PageText]
+    notes: list[str] = field(default_factory=list)
+    parts: list[PartInfo] = field(default_factory=list)
+    mail: MailInfo | None = None
+    reused_ocr_pages: int = 0         # Seiten mit Texterkennung, die von gleichem Inhalt übernommen wurden
+
+    def __iter__(self):
+        return iter((self.pages, self.notes))
 
 
 _TOKEN_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
@@ -234,11 +278,13 @@ def _join(*parts: str) -> str:
     return "\n".join(p for p in parts if p.strip())
 
 
-def extract_pdf(path: Path, engine) -> list[PageText]:
+def extract_pdf(src: Path | bytes, engine, max_pages: int | None = None,
+                notes: list[str] | None = None) -> list[PageText]:
+    """PDF aus einer Datei oder aus Bytes (Mail-Anhang). max_pages: höchstens so viele Seiten (Hinweis in notes)."""
     import pypdfium2 as pdfium
     import pypdfium2.raw as pdfium_c
     try:
-        pdf = pdfium.PdfDocument(str(path))
+        pdf = pdfium.PdfDocument(bytes(src) if isinstance(src, (bytes, bytearray, memoryview)) else str(src))
     except pdfium.PdfiumError as e:
         msg = str(e).lower()
         if "password" in msg:
@@ -246,7 +292,12 @@ def extract_pdf(path: Path, engine) -> list[PageText]:
         raise ExtractError(f"PDF beschädigt oder nicht lesbar ({e})") from e
     pages: list[PageText] = []
     try:
-        for i in range(len(pdf)):
+        total = len(pdf)
+        if max_pages is not None and total > max_pages:
+            if notes is not None:
+                notes.append(f"{NOTE_PREFIX} nur die ersten {max_pages} von {total} Seiten eingelesen")
+            total = max_pages
+        for i in range(total):
             page = pdf[i]
             try:
                 tp = page.get_textpage()
@@ -292,7 +343,8 @@ def extract_pdf(path: Path, engine) -> list[PageText]:
     return pages
 
 
-def _extract_frames(path: Path, engine, notes: list[str]) -> list[PageText]:
+def _extract_frames(path: Path | io.BytesIO, engine, notes: list[str],
+                    max_pages: int = MAX_IMAGE_PAGES) -> list[PageText]:
     """Mehrseitige Bilder (Fax-TIFF) Seite für Seite: nie alle Seiten gleichzeitig im Speicher."""
     try:
         im = Image.open(path)
@@ -304,7 +356,8 @@ def _extract_frames(path: Path, engine, notes: list[str]) -> list[PageText]:
             total = getattr(im, "n_frames", 1)
         except Exception as e:
             raise ExtractError(f"Bild nicht lesbar ({e})") from e
-        for i in range(min(total, MAX_IMAGE_PAGES)):
+        max_pages = min(max_pages, MAX_IMAGE_PAGES)
+        for i in range(min(total, max_pages)):
             try:
                 im.seek(i)
                 frame = to_rgb(im)
@@ -313,8 +366,8 @@ def _extract_frames(path: Path, engine, notes: list[str]) -> list[PageText]:
             res = _best_ocr(engine, frame)
             out.append(PageText(i + 1, res.text, "ocr", res.confidence))
             _page_done()
-    if total > MAX_IMAGE_PAGES:
-        notes.append(f"{NOTE_PREFIX} nur die ersten {MAX_IMAGE_PAGES} von {total} Seiten eingelesen")
+    if total > max_pages:
+        notes.append(f"{NOTE_PREFIX} nur die ersten {max_pages} von {total} Seiten eingelesen")
     return out
 
 
@@ -349,15 +402,114 @@ def extract_image(path: Path, engine, notes: list[str] | None = None) -> list[Pa
     return [PageText(1, res.text, "ocr", res.confidence)]
 
 
+# --- Bilder aus Bytes (Mail-Anhänge) --------------------------------------------------------------
+
+def sniff(data: bytes) -> str | None:
+    """Dateiart an den ersten Bytes: pdf | png | jpeg | gif | tiff | heic | bmp | webp | zip | ole | rtf |
+    appledouble | tnef – oder None. Mail-Anhänge heißen oft application/octet-stream; die Angabe in der Mail
+    und die Endung sind kein Beleg für den Inhalt."""
+    head = bytes(data[:16])
+    if head.startswith(b"%PDF") or b"%PDF-" in bytes(data[:1024]):
+        return "pdf"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if head.startswith((b"GIF87a", b"GIF89a")):
+        return "gif"
+    if head.startswith((b"II*\x00", b"MM\x00*")):
+        return "tiff"
+    if head[4:8] == b"ftyp" and head[8:12] in (b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"mif1",
+                                                 b"msf1"):
+        return "heic"
+    if head.startswith(b"BM") and len(data) > 26:
+        return "bmp"
+    if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
+        return "webp"
+    if head.startswith(b"PK\x03\x04"):
+        return "zip"
+    if head.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+        return "ole"
+    if head.startswith(b"{\\rtf"):
+        return "rtf"
+    if head.startswith((b"\x00\x05\x16\x07", b"\x00\x05\x16\x00")):
+        return "appledouble"
+    if head.startswith(b"\x78\x9f\x3e\x22"):
+        return "tnef"
+    return None
+
+
+IMAGE_KINDS = {"png", "jpeg", "gif", "tiff", "heic", "bmp", "webp"}
+
+
+def image_size(data: bytes) -> tuple[int, int] | None:
+    """Pixelgröße eines Bildes, ohne es zu dekodieren (None, wenn Pillow das Format nicht kennt, z. B. HEIC)."""
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            return im.size
+    except Exception:
+        return None
+
+
+def extract_image_bytes(data: bytes, engine, notes: list[str] | None = None,
+                        max_pages: int = MAX_IMAGE_PAGES) -> list[PageText]:
+    """Bild aus Bytes (Mail-Anhang). Vision liest die Bytes direkt (auch HEIC), ohne Temp-Datei."""
+    if engine is None:
+        return [PageText(1, "", "ocr", 0.0)]
+    kind = sniff(data)
+    if kind in ("tiff", "gif"):
+        return _extract_frames(io.BytesIO(data), engine, notes if notes is not None else [], max_pages)
+    res, err = None, None
+    rec = getattr(engine, "recognize_bytes", None)
+    if rec is not None:
+        try:
+            res = rec(data)
+        except ImageFormatError as e:
+            raise ExtractError(str(e)) from e
+        except Exception as e:
+            err = e
+    if res is None or res.chars < RETRY_BELOW_CHARS or res.confidence < RETRY_BELOW_CONF:
+        try:
+            image = load_image_bytes(data)
+            better = (_best_ocr(engine, image) if res is None
+                      else engine.recognize_image(enhance(image)))
+            if res is None or better.chars * max(better.confidence, 0.05) > res.chars * max(res.confidence, 0.05):
+                res = better
+        except ImageFormatError as e:
+            if res is None:
+                raise ExtractError(str(e)) from e
+        except Exception as e:
+            if res is None:
+                raise ExtractError(f"Bild nicht lesbar ({err or e})") from e
+    return [PageText(1, res.text, "ocr", res.confidence)]
+
+
+def extract_full(path: Path, engine, *, known: dict | None = None, safe: bool = False,
+                 root: str | None = None) -> Extracted:
+    """Datei einlesen. Bei E-Mails mit Teilen und Mailkopf.
+
+    known: sha256 -> Seiten von Anhängen, deren Inhalt schon eingelesen ist (keine erneute OCR).
+    safe: E-Mail ohne PDF- und Bild-Anhänge lesen (Rückfall nach Zeitlimit oder Absturz).
+    root: eingelesener Ordner (für Verweise auf Dateien im Vorgangsordner)."""
+    ext = path.suffix.lower()
+    if ext in MAIL_EXT:
+        from .mail import extract_mail
+        return extract_mail(path, engine, known=known, safe=safe, root=root)
+    notes: list[str] = []
+    if ext in PDF_EXT:
+        return Extracted(extract_pdf(path, engine), notes)
+    if ext in IMAGE_EXT:
+        return Extracted(extract_image(path, engine, notes), notes)
+    if ext in WORD_EXT:
+        from .word import extract_word
+        return Extracted(extract_word(path, notes), notes)
+    raise ExtractError("Dateityp nicht unterstützt")
+
+
 def extract_with_notes(path: Path, engine) -> tuple[list[PageText], list[str]]:
     """Wie extract(), dazu Hinweise für den Bericht (z. B. nicht alle Seiten eingelesen)."""
-    notes: list[str] = []
-    ext = path.suffix.lower()
-    if ext in PDF_EXT:
-        return extract_pdf(path, engine), notes
-    if ext in IMAGE_EXT:
-        return extract_image(path, engine, notes), notes
-    raise ExtractError("Dateityp nicht unterstützt")
+    res = extract_full(path, engine)
+    return res.pages, res.notes
 
 
 def extract(path: Path, engine) -> list[PageText]:

@@ -213,3 +213,120 @@ def indexed(corpus, tmp_path):
     engine = CountingEngine()
     run_index(con, [str(root)], engine=engine, log=lambda s: None)
     return root, files, db_path, con, engine
+
+
+# --- E-Mails und Word (nur erfundene Daten, Adressen auf .example) --------------------------------------
+
+def make_eml(path: Path, *, subject: str | None = "Rechnung", sender: str | None = "Erika Beispiel <erika@firma.example>",
+             to: str | None = "Hausverwaltung Nord <info@hv-nord.example>", cc: str | None = None,
+             date: str | None = "Fri, 12 Mar 2021 14:05:00 +0100", text: str | None = None, html: str | None = None,
+             attachments=(), inline=(), headers: dict | None = None) -> Path:
+    """Synthetische E-Mail schreiben. attachments: [(Name, Bytes, "typ/untertyp")] oder angehängte
+    EmailMessage (message/rfc822); inline: [(Name, Bytes, "typ/untertyp")] mit Content-Disposition inline."""
+    from email import policy
+    from email.message import EmailMessage
+    msg = EmailMessage(policy=policy.SMTP)
+    for key, value in (("Subject", subject), ("From", sender), ("To", to), ("Cc", cc), ("Date", date)):
+        if value is not None:
+            msg[key] = value
+    for key, value in (headers or {}).items():
+        msg[key] = value
+    if html is not None and text is not None:
+        msg.set_content(text)
+        msg.add_alternative(html, subtype="html")
+    elif html is not None:
+        msg.set_content(html, subtype="html")
+    else:
+        msg.set_content(text if text is not None else "")
+    for i, (name, data, mime) in enumerate(inline):
+        maintype, subtype = mime.split("/")
+        msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=name, disposition="inline",
+                           cid=f"<bild{i}@mail.example>")
+    for att in attachments:
+        if isinstance(att, EmailMessage):
+            msg.add_attachment(att)
+            continue
+        name, data, mime = att
+        maintype, subtype = mime.split("/")
+        msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(msg.as_bytes())
+    return path
+
+
+def docx_bytes(paragraphs: list[str], *, header: str | None = None, footer: str | None = None,
+               footnote: str | None = None, page_break_before: int | None = None, table: list[list[str]] | None = None,
+               fallback_dup: str | None = None, images: int = 0) -> bytes:
+    """Kleine, gültige docx-Datei im Speicher (zipfile), ohne Word."""
+    import io
+    import zipfile
+    from xml.sax.saxutils import escape
+    w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    mc = 'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"'
+    body = []
+    for i, p in enumerate(paragraphs):
+        br = '<w:r><w:br w:type="page"/></w:r>' if page_break_before == i else ""
+        body.append(f'<w:p>{br}<w:r><w:t xml:space="preserve">{escape(p)}</w:t></w:r></w:p>')
+    if table:
+        rows = "".join("<w:tr>" + "".join(f"<w:tc><w:p><w:r><w:t>{escape(c)}</w:t></w:r></w:p></w:tc>" for c in row)
+                       + "</w:tr>" for row in table)
+        body.append(f"<w:tbl>{rows}</w:tbl>")
+    if fallback_dup:
+        body.append(f'<w:p><w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:t>{escape(fallback_dup)}</w:t>'
+                    f'</mc:Choice><mc:Fallback><w:t>{escape(fallback_dup)}</w:t></mc:Fallback>'
+                    '</mc:AlternateContent></w:r></w:p>')
+    files = {
+        "[Content_Types].xml": '<?xml version="1.0" encoding="UTF-8"?><Types '
+                               'xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+        "word/document.xml": f'<?xml version="1.0" encoding="UTF-8"?><w:document {w} {mc}><w:body>'
+                             + "".join(body) + "</w:body></w:document>",
+    }
+    for name, content in (("word/header1.xml", header), ("word/footer1.xml", footer)):
+        if content is not None:
+            tag = "hdr" if "header" in name else "ftr"
+            files[name] = f'<w:{tag} {w}><w:p><w:r><w:t>{escape(content)}</w:t></w:r></w:p></w:{tag}>'
+    if footnote is not None:
+        files["word/footnotes.xml"] = (f'<w:footnotes {w}><w:footnote><w:p><w:r><w:t>{escape(footnote)}</w:t></w:r>'
+                                       "</w:p></w:footnote></w:footnotes>")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, content in files.items():
+            z.writestr(name, content)
+        for i in range(images):
+            z.writestr(f"word/media/image{i + 1}.png", b"\x89PNG\r\n\x1a\n" + bytes(64))
+    return buf.getvalue()
+
+
+def textutil_word(tmp: Path, name: str, text: str) -> Path:
+    """Word-Testdatei (.doc/.docx/.rtf/.odt) mit macOS textutil aus einer Textdatei in tmp erzeugen."""
+    import subprocess
+    src = tmp / (name + ".txt")
+    src.write_text(text, encoding="utf-8")
+    out = tmp / name
+    fmt = out.suffix.lstrip(".")
+    subprocess.run(["/usr/bin/textutil", "-convert", fmt, str(src), "-output", str(out)], check=True,
+                   capture_output=True, timeout=60)
+    src.unlink()
+    return out
+
+
+class BytesEngine:
+    """Ersatz-OCR ohne Vision: liefert für jedes Bild einen festen Text und zählt die Aufrufe
+    (recognize_bytes = Mail-Anhang, recognize_image = gerenderte PDF-Seite)."""
+
+    def __init__(self, text="Belegfoto Baumarkt Nord Kassenbon Summe 11,48 EUR Musterstadt", conf=0.9):
+        from belegsuche.ocr import OcrResult
+        self._result = OcrResult(text, conf)
+        self.calls = 0
+
+    def recognize_image(self, img):
+        self.calls += 1
+        return self._result
+
+    def recognize_file(self, path):
+        self.calls += 1
+        return self._result
+
+    def recognize_bytes(self, data):
+        self.calls += 1
+        return self._result
