@@ -96,11 +96,12 @@ def _part_labels(con, file_id: int):
 def _attachment_stats(con) -> dict | None:
     """Mail-Anhänge fertig eingelesener Mails: ausgewertet, übernommen (gleicher Inhalt schon eingelesen),
     DOMUS-Platzhalter, doppelt in derselben Mail und nicht ausgewertet (Logos zählen nicht, Excel, zu groß …).
-    Anhänge in einer winmail.dat zählen mit; die winmail.dat selbst zählt getrennt (tnef: ausgewertet, Anhänge
-    darin, nicht ausgewertet mit Grund)."""
+    Anhänge in einer winmail.dat zählen mit; die winmail.dat selbst zählt getrennt (tnef: geöffnet, davon nur mit
+    Logos bzw. ohne Anhänge, nicht ausgewertet mit Grund, noch nicht geöffnet – von einer früheren Version nur
+    vermerkt, der nächste Lauf von „belegsuche index“ liest sie)."""
     if not dbm.has_table(con, "parts"):
         return None
-    from .mail import DUPLICATE_NOTE, REUSED_NOTE, TNEF_READ
+    from .mail import DUPLICATE_NOTE, REUSED_NOTE, TNEF_LOGOS_ONLY, TNEF_NO_ATTACHMENTS, TNEF_READ
     dup = DUPLICATE_NOTE + " %"
     row = con.execute(
         "SELECT count(*) AS n,"
@@ -114,18 +115,23 @@ def _attachment_stats(con) -> dict | None:
         " AND t.kind != 'tnef'",
         (REUSED_NOTE, REUSED_NOTE, dup, dup)).fetchone()
     out = {k: row[k] for k in ("n", "evaluated", "reused", "links", "duplicates", "skipped", "in_tnef")}
-    tnef = {"n": 0, "read": 0, "not_read": {}}
+    tnef = {"n": 0, "read": 0, "logos_only": 0, "no_attachments": 0, "not_read": {}}
     for note, n in con.execute(
             "SELECT t.note, count(*) FROM parts t JOIN files f ON f.id = t.file_id"
             " WHERE t.part_no > 0 AND f.status = 'done' AND t.kind = 'tnef' GROUP BY t.note"):
         tnef["n"] += n
         if (note or "").startswith(TNEF_READ):
             tnef["read"] += n
+            tnef["logos_only"] += n if note.startswith(TNEF_LOGOS_ONLY) else 0
+            tnef["no_attachments"] += n if note.startswith(TNEF_NO_ATTACHMENTS) else 0
         else:
             why = re.sub(r"\s*\(.*$", "", note or "") if (note or "").startswith("nicht lesbar") else (note or "")
             why = re.sub(r"^nicht ausgewertet \((.*)\)$", r"\1", why) or "ohne Angabe"
             why = re.sub(r"zu groß: \d+ MB", "zu groß", why)
             tnef["not_read"][why] = tnef["not_read"].get(why, 0) + n
+    tnef["outdated"] = con.execute(
+        "SELECT count(*) FROM parts t JOIN files f ON f.id = t.file_id WHERE t.part_no > 0 AND f.status = 'done'"
+        f" AND t.note IN {dbm.OUTDATED_IN_SQL}", dbm.OUTDATED_PART_NOTES).fetchone()[0]
     out["tnef"] = tnef
     return out
 
@@ -261,8 +267,15 @@ def format_report(r: dict, max_problems: int = 25) -> str:
     if tn and tn["n"]:
         nr = sum(tn["not_read"].values())
         why = ", ".join(f"{k} {v}" for k, v in sorted(tn["not_read"].items(), key=lambda kv: (-kv[1], kv[0])))
-        lines.append(f"winmail.dat (Outlook): {tn['read']} geöffnet, darin {att['in_tnef']} Anhänge (oben mitgezählt)"
+        empty = ", ".join(x for x in (f"{tn['logos_only']} nur Logos" if tn["logos_only"] else "",
+                                      f"{tn['no_attachments']} ohne Anhänge" if tn["no_attachments"] else "") if x)
+        n_in = att["in_tnef"]
+        lines.append(f"winmail.dat (Outlook): {tn['read']} geöffnet" + (f" (davon {empty})" if empty else "")
+                     + f", darin {n_in} {'Anhang' if n_in == 1 else 'Anhänge'} (oben mitgezählt)"
                      + (f"; {nr} nicht ausgewertet ({why})" if nr else ""))
+    if tn and tn.get("outdated"):
+        lines.append(f"winmail.dat (Outlook): {tn['outdated']} noch nicht geöffnet – der nächste Lauf von "
+                     "„belegsuche index“ liest sie (schon erkannte Seiten werden übernommen)")
     if r.get("broken_names"):
         names = r["broken_name_list"]
         lines += ["", f"Dateinamen mit beschädigten Umlauten: {r['broken_names']}  (beim Kopieren falsch übertragen? "

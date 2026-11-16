@@ -7,7 +7,8 @@ von attAttachment. Der Mailtext steht in attMsgProps (PR_BODY, PR_HTML oder PR_R
 komprimiert, MS-OXRTFCP) oder in attBody.
 
 Der Leser wirft nie: jede Längenangabe wird gegen den Rest geprüft (keine Allokation aus einem Längenfeld), die
-Zahl der Attribute, Eigenschaften und Anhänge und die Größe des entpackten RTF sind begrenzt. Kaputte oder
+Zahl der Attribute, Eigenschaften und Anhänge, die Arbeit für Eigenschaftslisten (Budget, je Strom oder für alle
+winmail.dat einer Mail), die Länge von Namen und die Größe des entpackten RTF sind begrenzt. Kaputte oder
 abgeschnittene Dateien liefern, was lesbar ist, dazu einen Hinweis (Message.notes). Falsche Prüfsumme: weiterlesen,
 mit Hinweis.
 
@@ -28,6 +29,9 @@ MAX_ATTRIBUTES = 100_000                   # Attribute je Strom
 MAX_ATTACHMENTS = 1_000                    # Anhänge je Strom
 MAX_PROPS = 20_000                         # Eigenschaften je Liste
 MAX_VALUES = 100_000                       # Werte je Liste (Mehrfachwerte zählen einzeln)
+MAX_PROP_WORK = 200_000                    # Eigenschaften und einzeln gelesene Werte aller Listen zusammen (Budget)
+MAX_NAME_CHARS = 2048                      # Namen, MIME-Art, Betreff: höchstens so viele Zeichen (Anfang + Ende)
+BUDGET_NOTE = "zu viele Eigenschaften – Rest übersprungen"
 MAX_RTF_BYTES = 4 * 1024 * 1024            # entpacktes RTF (Schutz vor Kompressionsbomben)
 
 # Attribute: nur die Nummer (untere 16 Bit) zählt, der Typ in den oberen Bits wird nicht geprüft
@@ -100,8 +104,18 @@ def codec_name(cp: int | None) -> str:
     return name
 
 
+_WINDOWS_8BIT = re.compile(r"cp125\d")
+
+
+def decode_cp(raw: bytes, codec: str) -> str:
+    """Bytes einer Codepage dekodieren. In den Windows-Codepages 125x nicht belegte Bytes (in 1252: 0x81, 0x8D, 0x8F,
+    0x90, 0x9D – meist Zeichen einer Symbolschrift) fallen weg, statt „\ufffd“ zu werden."""
+    s = bytes(raw).decode(codec, errors="replace")
+    return s.replace("\ufffd", "") if _WINDOWS_8BIT.fullmatch(codec) else s
+
+
 def _decode8(raw: bytes, cp: int | None) -> str:
-    return bytes(raw).split(b"\x00", 1)[0].decode(codec_name(cp), errors="replace")
+    return decode_cp(bytes(raw).split(b"\x00", 1)[0], codec_name(cp))
 
 
 def _decode16(raw: bytes) -> str:
@@ -117,8 +131,13 @@ class _Str:
     raw: bytes
     unicode: bool = False
 
-    def text(self, cp: int | None) -> str:
-        return _decode16(self.raw) if self.unicode else _decode8(self.raw, cp)
+    def text(self, cp: int | None, limit: int | None = None) -> str:
+        """Dekodiert; mit limit höchstens limit Zeichen: Anfang und Ende (dort steht die Endung). Ein präparierter
+        Name mit Millionen Zeichen landete sonst in Teil, Anzeige und Suchindex."""
+        s = _decode16(self.raw) if self.unicode else _decode8(self.raw, cp)
+        if limit is not None and len(s) > limit:
+            s = s[:limit // 2] + s[-(limit // 2):]
+        return s
 
 
 @dataclass
@@ -188,6 +207,16 @@ class Message:
         return None
 
 
+class Budget:
+    """Arbeit für Eigenschaftslisten: jede Eigenschaft und jeder einzeln gelesene Wert kostet eins. Gilt für alle
+    Listen eines Stroms; der Aufrufer kann ein Budget an mehrere Ströme geben (alle winmail.dat einer Mail). Schutz vor
+    präparierten Listen, deren Zerlegen sonst viele Sekunden kostet; echte Ströme brauchen wenige Hundert."""
+    __slots__ = ("left",)
+
+    def __init__(self, n: int | None = None):
+        self.left = MAX_PROP_WORK if n is None else n
+
+
 class _Reader:
     __slots__ = ("buf", "pos", "end")
 
@@ -230,10 +259,16 @@ def _pad(n: int) -> int:
     return -n % 4
 
 
-def parse_props(data: bytes) -> tuple[list[tuple[int, int, list[bytes]]], str | None]:
+def parse_props(data: bytes, wanted: frozenset[int] | None = None,
+                budget: Budget | None = None) -> tuple[list[tuple[int, int, list[bytes]]], str | None]:
     """MAPI-Eigenschaftsliste (attMsgProps, attAttachment): [(Typ, Nummer, [Werte als Bytes])], Hinweis.
     Benannte Eigenschaften (Nummer ab 0x8000) und Mehrfachwerte werden übersprungen bzw. mitgelesen; bei einem
-    unbekannten Typ oder einer zu großen Länge endet die Liste dort (das Gelesene bleibt)."""
+    unbekannten Typ oder einer zu großen Länge endet die Liste dort (das Gelesene bleibt).
+    wanted: nur diese Nummern kommen mit ihren Werten zurück; die übrigen werden ohne Kopie übersprungen (Werte fester
+    Größe in einem Schritt). budget: ist es aufgebraucht, endet die Liste mit dem Hinweis BUDGET_NOTE."""
+    budget = Budget() if budget is None else budget
+    if budget.left <= 0:
+        return [], BUDGET_NOTE
     r = _Reader(data)
     out: list[tuple[int, int, list[bytes]]] = []
     values = 0
@@ -245,6 +280,9 @@ def parse_props(data: bytes) -> tuple[list[tuple[int, int, list[bytes]]], str | 
         else:
             note = None
         for _ in range(count):
+            budget.left -= 1
+            if budget.left < 0:
+                return out, BUDGET_NOTE
             ptype, pid = r.u16(), r.u16()
             if pid >= 0x8000:                       # benannte Eigenschaft: GUID, Art, Nummer oder Name
                 r.skip(16)
@@ -268,17 +306,32 @@ def parse_props(data: bytes) -> tuple[list[tuple[int, int, list[bytes]]], str | 
             values += n_vals
             if values > MAX_VALUES:
                 return out, "zu viele Eigenschaftswerte"
+            keep = wanted is None or pid in wanted
+            if base in _FIXED and not keep:         # feste Größe, nicht gebraucht: in einem Schritt weiter
+                size = _FIXED[base]
+                step = size + _pad(size)
+                if n_vals * step - _pad(size) > r.left:
+                    raise _Short
+                r.skip(min(n_vals * step, r.left))
+                continue
+            budget.left -= n_vals
+            if budget.left < 0:
+                return out, BUDGET_NOTE
             vals = []
             for _ in range(n_vals):
                 if base in _VARIABLE:
                     n = r.u32()
-                    vals.append(r.take(n))
+                    if keep:
+                        vals.append(r.take(n))
+                    else:
+                        r.skip(n)
                     r.skip(min(_pad(n), r.left))
                 else:
                     size = _FIXED[base]
                     vals.append(r.take(size))
                     r.skip(min(_pad(size), r.left))
-            out.append((ptype, pid, vals))
+            if keep:
+                out.append((ptype, pid, vals))
     except _Short:
         return out, "Eigenschaftsliste abgeschnitten"
     return out, note
@@ -300,6 +353,14 @@ def _str_of(ptype: int, vals: list[bytes]) -> _Str | None:
     if base in (PT_STRING8, PT_BINARY):
         return _Str(vals[0], False)
     return None
+
+
+# Eigenschaften, die der Leser auswertet (alle übrigen werden übersprungen)
+_MESSAGE_PROPS = frozenset({PR_MESSAGE_CODEPAGE, PR_INTERNET_CPID, PR_BODY, PR_SUBJECT, PR_MESSAGE_CLASS,
+                            PR_SENDER_NAME, PR_SENT_REPRESENTING_NAME, PR_HTML, PR_RTF_COMPRESSED})
+_ATTACHMENT_PROPS = frozenset({PR_ATTACH_LONG_FILENAME, PR_DISPLAY_NAME, PR_ATTACH_FILENAME, PR_ATTACH_MIME_TAG,
+                               PR_ATTACH_CONTENT_ID, PR_ATTACH_METHOD, PR_ATTACH_FLAGS, PR_ATTACHMENT_HIDDEN,
+                               PR_ATTACH_DATA})
 
 
 def _apply_attachment_props(att: Attachment, props) -> None:
@@ -334,10 +395,10 @@ def _finish_attachment(att: Attachment, cp_props: int | None, cp_oem: int | None
                       (PR_ATTACH_FILENAME, "filename"), (PR_ATTACH_MIME_TAG, "mime"),
                       (PR_ATTACH_CONTENT_ID, "content_id")):
         if pid in raw:
-            setattr(att, attr, raw[pid].text(cp_props) or None)
+            setattr(att, attr, raw[pid].text(cp_props, MAX_NAME_CHARS) or None)
     for key, attr in (("title", "title"), ("transport", "transport_name")):
         if key in raw:
-            setattr(att, attr, raw[key].text(cp_oem) or None)
+            setattr(att, attr, raw[key].text(cp_oem, MAX_NAME_CHARS) or None)
     if att.embedded and "obj" in raw:
         att.data = raw["obj"]                       # eingebettete Nachricht: der TNEF-Strom zählt
     elif att.data is None:
@@ -364,11 +425,12 @@ def _apply_message_props(msg: Message, props, raw: dict) -> None:
             raw.setdefault("rtf", vals[0])
 
 
-def parse(data: bytes) -> Message:
-    """TNEF-Strom zerlegen. Wirft nicht; was nicht lesbar ist, steht als Hinweis in Message.notes."""
+def parse(data: bytes, budget: Budget | None = None) -> Message:
+    """TNEF-Strom zerlegen. Wirft nicht; was nicht lesbar ist, steht als Hinweis in Message.notes.
+    budget: Arbeit für die Eigenschaftslisten (ohne Angabe: ein eigenes für diesen Strom)."""
     msg = Message()
     try:
-        _parse(data, msg)
+        _parse(data, msg, Budget() if budget is None else budget)
     except MemoryError:
         raise
     except Exception as e:             # zur Sicherheit: ein Fehler im Leser darf das Einlesen nicht stoppen
@@ -376,7 +438,15 @@ def parse(data: bytes) -> Message:
     return msg
 
 
-def _parse(data: bytes, msg: Message) -> None:
+def _props_note(msg: Message, where: str, note: str) -> None:
+    if note == BUDGET_NOTE:                         # einmal je Strom, nicht je Anhang
+        if note not in msg.notes:
+            msg.notes.append(note)
+    else:
+        msg.notes.append(f"{where}: {note}")
+
+
+def _parse(data: bytes, msg: Message, budget: Budget) -> None:
     buf = memoryview(data) if not isinstance(data, memoryview) else data
     n = len(buf)
     if n < 6 or bytes(buf[:4]) != SIGNATURE:
@@ -413,7 +483,7 @@ def _parse(data: bytes, msg: Message) -> None:
         num = att_id & 0xFFFF
         msg.n_attributes += 1
         if level == 1:
-            _message_attr(msg, num, chunk, raw)
+            _message_attr(msg, num, chunk, raw, budget)
         else:
             # neuer Anhang: attAttachRendData – oder (ohne sie) ein Attribut, das der Anhang schon hat, bzw. Inhalt
             # nach seinen Eigenschaften (attAttachment steht am Ende eines Anhangs)
@@ -439,10 +509,10 @@ def _parse(data: bytes, msg: Message) -> None:
             elif num == _ATT_ATTACH_TRANSPORT_FILENAME:
                 cur._raw["transport"] = _Str(bytes(chunk))
             elif num == _ATT_ATTACHMENT:
-                props, note = parse_props(chunk)
+                props, note = parse_props(chunk, _ATTACHMENT_PROPS, budget)
                 _apply_attachment_props(cur, props)
                 if note:
-                    msg.notes.append(f"Anhang {len(msg.attachments)}: {note}")
+                    _props_note(msg, f"Anhang {len(msg.attachments)}", note)
         if truncated:
             break
         pos = end + 2
@@ -451,7 +521,7 @@ def _parse(data: bytes, msg: Message) -> None:
     _finish_message(msg, raw)
 
 
-def _message_attr(msg: Message, num: int, chunk, raw: dict) -> None:
+def _message_attr(msg: Message, num: int, chunk, raw: dict, budget: Budget) -> None:
     if num == _ATT_OEM_CODEPAGE and len(chunk) >= 4:
         msg.oem_codepage = struct.unpack_from("<I", chunk, 0)[0] or None
     elif num == _ATT_MESSAGE_CLASS:
@@ -461,10 +531,10 @@ def _message_attr(msg: Message, num: int, chunk, raw: dict) -> None:
     elif num == _ATT_BODY:
         raw.setdefault("body", _Str(bytes(chunk)))
     elif num == _ATT_MSG_PROPS:
-        props, note = parse_props(chunk)
+        props, note = parse_props(chunk, _MESSAGE_PROPS, budget)
         _apply_message_props(msg, props, raw)
         if note:
-            msg.notes.append(f"Nachricht: {note}")
+            _props_note(msg, "Nachricht", note)
 
 
 def _finish_message(msg: Message, raw: dict) -> None:
@@ -472,12 +542,13 @@ def _finish_message(msg: Message, raw: dict) -> None:
     cp_props = msg.codepage or msg.oem_codepage
     cp_oem = msg.oem_codepage or msg.codepage
 
-    def text(key, cp) -> str | None:
+    def text(key, cp, limit=None) -> str | None:
         s = raw.get(key)
-        return (s.text(cp) or None) if s is not None else None
-    msg.message_class = text(PR_MESSAGE_CLASS, cp_props) or text("class", cp_oem)
-    msg.subject = text(PR_SUBJECT, cp_props) or text("subject", cp_oem)
-    msg.sender = text(PR_SENT_REPRESENTING_NAME, cp_props) or text(PR_SENDER_NAME, cp_props)
+        return (s.text(cp, limit) or None) if s is not None else None
+    msg.message_class = text(PR_MESSAGE_CLASS, cp_props, MAX_NAME_CHARS) or text("class", cp_oem, MAX_NAME_CHARS)
+    msg.subject = text(PR_SUBJECT, cp_props, MAX_NAME_CHARS) or text("subject", cp_oem, MAX_NAME_CHARS)
+    msg.sender = text(PR_SENT_REPRESENTING_NAME, cp_props, MAX_NAME_CHARS) \
+        or text(PR_SENDER_NAME, cp_props, MAX_NAME_CHARS)
     msg.body = text(PR_BODY, cp_props) or text("body", cp_oem)
     msg.html = text("html", cp_props)
     msg.rtf_compressed = raw.get("rtf")
@@ -568,7 +639,7 @@ def rtf_to_text(rtf: bytes) -> tuple[str, str]:
 
     def flush():
         if buf:
-            out.append(buf.decode(cp, errors="replace"))
+            out.append(decode_cp(buf, cp))
             buf.clear()
 
     stack: list[tuple] = []
@@ -646,7 +717,7 @@ def rtf_to_text(rtf: bytes) -> tuple[str, str]:
                 out.append("-")
         elif text:
             flush()
-            out.append(text.decode(cp, errors="replace"))
+            out.append(decode_cp(text, cp))
     flush()
     s = "".join(out)
     # \uN mit Ersatzpaaren (Emoji): zusammensetzen, einzelne Hälften ersetzen

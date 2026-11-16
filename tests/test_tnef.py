@@ -14,6 +14,7 @@ from .conftest import (MV, PS_PUBLIC_STRINGS, PT_BINARY, PT_LONG, PT_OBJECT, PT_
 PDF = b"%PDF-1.4\n" + b"Rechnung RE-2024/0815 Gartenbau Eiche\n" * 20 + b"%%EOF\n"
 JPEG = b"\xff\xd8\xff\xe0" + bytes(500)
 PNG = b"\x89PNG\r\n\x1a\n" + bytes(300)
+SIG_KEY = b"\x78\x9f\x3e\x22\x00\x00"                 # Signatur und Schlüssel
 
 
 # --- Aufbau wie im Bestand ----------------------------------------------------------------------------------
@@ -331,3 +332,75 @@ def test_object_property_with_unknown_iid_is_plain_data():
 def test_string8_message_body_uses_message_codepage():
     data = tnef_bytes([], codepage=1252, extra_props=[(PT_STRING8, 0x1000, "Kündigung zum 31.12.".encode("cp1252"))])
     assert tnef.parse(data).body == "Kündigung zum 31.12."
+
+
+# --- Nachbesserung nach der Prüfung --------------------------------------------------------------------------
+
+def _prop_lists(n_lists: int, per_list: int, level: int = 1) -> bytes:
+    """attMsgProps (bzw. attAttachment) mit je per_list Eigenschaften PT_LONG, die der Leser nicht braucht."""
+    lst = struct.pack("<I", per_list) + struct.pack("<HHI", PT_LONG, 0x0E21, 7) * per_list
+    return tnef_attr(level, 0x00069003 if level == 1 else 0x00069005, lst) * n_lists
+
+
+def test_crafted_property_lists_stay_fast_and_the_attachment_is_still_read():
+    """Präparierte 50-MB-Ströme (Listen mit 20.000 Eigenschaften, Mehrfachwerte fester und variabler Größe): das
+    Budget gilt für alle Listen des Stroms, Werte fester Größe werden in einem Schritt übersprungen – unter 1 s je
+    Strom. Der Anhang dahinter wird trotzdem gelesen."""
+    att = tnef_attachment(PDF, "Rechnung.pdf")
+    many = SIG_KEY + _prop_lists(320, 19_000)                                    # 6 Mio. Eigenschaften
+    mv_fixed = struct.pack("<IHHI", 1, 0x0002 | MV, 0x0E22, 100_000) + bytes(4 * 100_000)
+    mv_var = struct.pack("<IHHI", 1, PT_BINARY | MV, 0x0E23, 100_000) + struct.pack("<I", 0) * 100_000
+    for data, budget_hit in ((many, True), (SIG_KEY + tnef_attr(1, 0x00069003, mv_fixed) * 125, False),
+                             (SIG_KEY + tnef_attr(1, 0x00069003, mv_var) * 125, True)):
+        assert len(data) > 40_000_000
+        t0 = time.time()
+        msg = tnef.parse(data + att)
+        assert time.time() - t0 < 1.0
+        assert (tnef.BUDGET_NOTE in msg.notes) == budget_hit and msg.notes.count(tnef.BUDGET_NOTE) <= 1
+        assert [a.data for a in msg.attachments] == [PDF] and msg.attachments[0].name == "Rechnung.pdf"
+
+
+def test_budget_is_shared_when_given():
+    """Ein Budget für mehrere Ströme (alle winmail.dat einer Mail): ist es aufgebraucht, fehlen nur die Eigenschaften
+    (Name dann aus attAttachTitle), Anhänge und ihre Daten bleiben."""
+    a, b = tnef_bytes([tnef_attachment(PDF, "Plan Süd.pdf")]), tnef_bytes([tnef_attachment(JPEG, "Foto Süd.jpg")])
+    probe = tnef.Budget()
+    tnef.parse(a, probe)
+    used = tnef.MAX_PROP_WORK - probe.left
+    assert 0 < used < 100                                       # echte Ströme brauchen wenig
+    budget = tnef.Budget(used + used // 2)
+    first = tnef.parse(a, budget)
+    assert first.attachments[0].name == "Plan Süd.pdf" and first.notes == []
+    second = tnef.parse(b, budget)
+    assert second.notes == [tnef.BUDGET_NOTE] and second.attachments[0].data == JPEG
+    assert second.attachments[0].name == "Foto S?d.jpg"         # Titel (OEM-Codepage, Umlaut als „?“)
+    assert tnef.parse(b).attachments[0].name == "Foto Süd.jpg"  # ohne Angabe: eigenes Budget je Strom
+
+
+def test_parse_props_wanted_skips_others_without_changing_positions():
+    lst = mapi_props([(PT_LONG | MV, 0x0E21, [1, 2, 3]), (PT_BINARY, 0x0FF9, b"abcde"), (0x0002, 0x0E22, 5),
+                      (PT_UNICODE, 0x3707, "Plan.pdf"), (PT_BINARY | MV, 0x0E23, [b"x", b"yz"]),
+                      (PT_LONG, 0x3705, 1)])
+    props, note = tnef.parse_props(lst, frozenset({0x3707, 0x3705}))
+    assert note is None and [(p[1], p[2]) for p in props] == [
+        (0x3707, ["Plan.pdf\x00".encode("utf-16-le")]), (0x3705, [struct.pack("<I", 1)])]
+    assert [p[1] for p in tnef.parse_props(lst)[0]] == [0x0E21, 0x0FF9, 0x0E22, 0x3707, 0x0E23, 0x3705]
+
+
+def test_huge_names_are_cut_keeping_start_and_extension():
+    big = "N" * 1_000_000 + "ä.pdf"
+    att = tnef.parse(tnef_bytes([tnef_attachment(PDF, big, mime="x/" + "y" * 500_000, variant="B")])).attachments[0]
+    assert len(att.long_name) == tnef.MAX_NAME_CHARS and att.long_name.endswith("Nä.pdf")
+    assert len(att.mime) == tnef.MAX_NAME_CHARS and att.mime.startswith("x/y") and att.data == PDF
+
+
+def test_unassigned_windows_bytes_are_dropped_not_replaced():
+    """In Windows-1252 nicht belegte Bytes (0x81, 0x8D, 0x8F, 0x90, 0x9D) – im RTF als \\'xx neben Symbolen –
+    werden weggelassen statt „�“; in Namen (PT_STRING8) genauso."""
+    rtf = b"{\\rtf1\\ansi\\ansicpg1252\\fromtext Stra\\'dfe \\'81\\'8d\\'8f\\'90\\'9d Ende\\par}"
+    kind, text = tnef.rtf_to_text(rtf)
+    assert text == "Straße  Ende\n" and "�" not in text
+    a = tnef_attachment(PDF, "x.pdf", variant="C", extra=[(PT_STRING8, 0x3707, b"Pl\x81an.pdf")])
+    assert tnef.parse(tnef_bytes([a], codepage=1252)).attachments[0].name == "Plan.pdf"
+    assert tnef.decode_cp(b"\x81", "cp1251") == "Ѓ"                 # andere Codepage: dort belegt
+    assert tnef.decode_cp(b"\xff\xfe", "utf-8") == "��"        # nur Windows-125x: sonst bleibt „�“

@@ -1289,7 +1289,8 @@ def run_index(con, folders: list[str], engine_name: str = "apple", confirm_missi
         for e in s.dir_errors[:10]:
             log(f"   nicht lesbar: {e}")
     scope = ids if folders else None
-    dbm.mark_outdated_mails(con)          # z. B. Mails, die ein älterer Lauf noch mit Format 10 geschrieben hat
+    # Mails mit einer nur vermerkten winmail.dat (Format 10, auch von einem älteren Lauf nach der Umstellung)
+    dbm.mark_outdated_mails(con, scope)
     con.commit()
     outdated = _count_outdated(con, scope)
     if outdated:

@@ -430,18 +430,29 @@ def test_log_line_counts_attachments_from_winmail(tmp_path):
 
 # --- Format 10 → 11: nur Mails mit winmail.dat neu lesen, ohne neue Texterkennung -------------------------------
 
-def _old_behaviour(monkeypatch):
-    """Format 10: eine winmail.dat wurde nur vermerkt (Teil 'skipped' mit Hinweis), nicht geöffnet."""
+def _old_behaviour(monkeypatch, pdf_first=True):
+    """Format 10 (Stand 64ab7d8): eine winmail.dat wurde nur vermerkt (Teil 'skipped' mit Hinweis), nicht geöffnet –
+    und „%PDF-“ in den ersten 1024 Bytes wurde vor der TNEF-Kennung geprüft (eine kleine winmail.dat mit einem PDF
+    vorn galt als PDF)."""
+    from belegsuche import extract
     real = mailmod._classify_content
+    real_sniff = mailmod.sniff
 
     def old(att, depth):
         att = real(att, depth)
         if att.kind == "tnef":
             att.kind, att.note = "skipped", OLD_NOTE
         return att
+
+    def old_sniff(data):
+        if bytes(data[:4]) == b"%PDF" or extract._pdf_after_preamble(bytes(data[:1024])):
+            return "pdf"
+        return real_sniff(data)
     monkeypatch.setattr(mailmod, "_classify_content", old)
+    if pdf_first:
+        monkeypatch.setattr(mailmod, "sniff", old_sniff)
     monkeypatch.setattr(dbm, "INDEX_FORMAT", "10")
-    monkeypatch.setattr(dbm, "mark_outdated_mails", lambda con: 0)
+    monkeypatch.setattr(dbm, "mark_outdated_mails", lambda con, root_ids=None: 0)
 
 
 def _migration_corpus(tmp_path):
@@ -481,13 +492,12 @@ def test_migration_10_to_11_rereads_only_mails_with_winmail_without_new_ocr(tmp_
     assert old_calls == 2                         # Scan der Aufzug-Rechnung (1 Seite) und das Foto in b.eml
     monkeypatch.undo()
 
-    con = dbm.connect(db)                          # Umstellung: nur die drei Mails mit winmail.dat
+    con = dbm.connect(db)                          # Umstellung: die Mails gelten bis zum Einlesen als fertig
     assert dbm.get_meta(con, "index_format") == "11"
-    pending = {r[0] for r in con.execute("SELECT relpath FROM files WHERE status = 'pending'")}
-    assert pending == {"090003/Emails/a.eml", "090003/Emails/kopie/a.eml", "090003/Emails/c.eml"}
+    assert con.execute("SELECT count(*) FROM files WHERE status != 'done'").fetchone()[0] == 0
     hits = Searcher(db).search("Anbei Unterlagen").hits            # bisheriger Stand bleibt durchsuchbar
     mails = [h for h in hits if h.kind == "mail"]
-    assert {h.filename for h in mails} == {"a.eml"} and all(h.outdated for h in mails)
+    assert {h.filename for h in mails} == {"a.eml"} and not any(h.outdated for h in mails)
     eng, log = BytesEngine(), []
     _, ps = run_index(con, [str(root)], engine=eng, log=log.append)
     assert ps.done == 3 and ps.errors == 0
@@ -512,14 +522,15 @@ def test_migration_10_to_11_rereads_only_mails_with_winmail_without_new_ocr(tmp_
 
 def test_mails_written_by_an_old_run_after_the_switch_are_reread(tmp_path, monkeypatch):
     """Läuft noch ein Einlesen mit dem alten Programm, wenn das neue den Index schon umgestellt hat: dessen Mails
-    holt der nächste Lauf nach."""
+    mit vermerkter winmail.dat holt der nächste Lauf nach. (Eine winmail.dat, die das alte Programm für ein PDF
+    hielt, erfasst nur die Umstellung selbst – test_migration_finds_winmail_that_format_10_read_as_pdf.)"""
     root = tmp_path / "ordner"
     pdf = pdf_bytes(tmp_path, [["Rechnung RE-12 Glaserei"]])
     winmail_eml(root / "a.eml", tnef_bytes([tnef_attachment(pdf, "Glas.pdf")]))
     db = tmp_path / "i.db"
     con = dbm.connect(db)                        # schon Format 11
     with monkeypatch.context() as m:
-        _old_behaviour(m)
+        _old_behaviour(m, pdf_first=False)
         run_index(con, [str(root)], engine=BytesEngine(), log=quiet)
     assert parts_of(con, ids_of(con)["a.eml"])[1]["note"] == OLD_NOTE
     _, ps = run_index(con, [str(root)], engine=BytesEngine(), log=quiet)
@@ -681,10 +692,11 @@ def test_report_counts_winmail(tmp_path):
     winmail_eml(root / "c.eml", b"\x78\x9f\x3e\x22" + bytes(50))
     db, con, ps = index(tmp_path, root)
     r = build_report(con)
-    assert r["attachments"]["tnef"] == {"n": 3, "read": 2, "not_read": {"nicht lesbar": 1}}
+    assert r["attachments"]["tnef"] == {"n": 3, "read": 2, "logos_only": 0, "no_attachments": 1,
+                                        "not_read": {"nicht lesbar": 1}, "outdated": 0}
     assert r["attachments"]["in_tnef"] == 2 and r["attachments"]["skipped"] == 1
-    assert ("winmail.dat (Outlook): 2 geöffnet, darin 2 Anhänge (oben mitgezählt); 1 nicht ausgewertet "
-            "(nicht lesbar 1)") in format_report(r)
+    assert ("winmail.dat (Outlook): 2 geöffnet (davon 1 ohne Anhänge), darin 2 Anhänge (oben mitgezählt); "
+            "1 nicht ausgewertet (nicht lesbar 1)") in format_report(r)
 
 
 def test_report_labels_unsure_pages_in_winmail(tmp_path):
@@ -739,3 +751,177 @@ def test_winmail_tests_leave_sources_untouched(tmp_path):
 
 def test_tnef_attr_helper_checksum_matches():
     assert tnef_attr(1, 0x00018004, b"ab")[-2:] == struct.pack("<H", ord("a") + ord("b"))
+
+
+# --- Nachbesserung nach der Prüfung ------------------------------------------------------------------------------
+
+def test_migration_finds_winmail_that_format_10_read_as_pdf(tmp_path, monkeypatch):
+    """Format 10 hielt eine kleine winmail.dat mit einem PDF vorn für ein PDF (Teil 'pdf' mit der sha256 der ganzen
+    winmail.dat und den Seiten nur dieses PDFs). Die Umstellung merkt sich solche Teile; der nächste Lauf liest die
+    Mail neu – mit allen Anhängen darin. Ein echtes PDF namens winmail.dat wird dabei einmal neu gelesen, nicht mehr."""
+    from belegsuche import extract
+    root = tmp_path / "ordner"
+    pdf = pdf_bytes(tmp_path, [["Rechnung RE-21 Zaunbau Holm"]])
+    tnef = tnef_bytes([tnef_attachment(pdf, "Zaun.pdf"), tnef_attachment(photo(("Zaunfeld", "Pfosten 7")), "Z.png")])
+    assert extract._pdf_after_preamble(tnef[:1024]) and extract.sniff(tnef) == "tnef"
+    winmail_eml(root / "a.eml", tnef)
+    make_eml(root / "b.eml", text="Echtes PDF mit falschem Namen",
+             attachments=[("winmail.dat", pdf_bytes(tmp_path, [["Mahnung M-5"]], "m.pdf"), "application/pdf")])
+    before = tree_state(root)
+    db = tmp_path / "i.db"
+    with monkeypatch.context() as m:
+        _old_behaviour(m)
+        con = dbm.connect(db)
+        run_index(con, [str(root)], engine=BytesEngine(), log=quiet)
+        ids = ids_of(con)
+        assert [(r["kind"], r["note"]) for r in parts_of(con, ids["a.eml"])[1:]] == [("pdf", None)]
+        con.close()
+    con = dbm.connect(db)
+    assert con.execute("SELECT count(*) FROM files WHERE status != 'done'").fetchone()[0] == 0
+    assert dbm.has_outdated_parts(con, ids["a.eml"]) and dbm.has_outdated_parts(con, ids["b.eml"])
+    eng = BytesEngine()
+    _, ps = run_index(con, [str(root)], engine=eng, log=quiet)
+    assert ps.done == 2 and ps.errors == 0 and eng.calls == 1                 # nur das Foto braucht Texterkennung
+    assert [(r["kind"], r["name"], r["mime_path"]) for r in parts_of(con, ids["a.eml"])[1:]] == [
+        ("tnef", "winmail.dat", "2"), ("pdf", "Zaun.pdf", "2!1"), ("image", "Z.png", "2!2")]
+    assert [(r["kind"], r["note"]) for r in parts_of(con, ids["b.eml"])[1:]] == [("pdf", None)]
+    hit = Searcher(db).search("RE-21 Zaunbau Holm").hits[0]
+    assert (hit.filename, hit.part_name, hit.part_from) == ("a.eml", "Zaun.pdf", "winmail.dat")
+    con.close()
+    con = dbm.connect(db)
+    _, ps = run_index(con, [str(root)], engine=BytesEngine(), log=quiet)
+    assert ps.done == 0                                                      # einmalig, nicht bei jedem Lauf
+    assert tree_state(root) == before
+
+
+def test_switch_alone_changes_nothing_visible_and_index_rereads_only_its_folders(tmp_path, monkeypatch, capsys):
+    """Die Umstellung (schon durch „suche“, „start“, „bericht“) setzt keine Mail auf „wird neu eingelesen“: bis
+    zum Einlesen gilt der bisherige Stand als fertig, der Bericht nennt die noch nicht geöffneten winmail.dat. Ein
+    Lauf über einen Ordner liest nur dessen Mails neu."""
+    pdf = pdf_bytes(tmp_path, [["Rechnung RE-22 Kaminkehrer Ost"]])
+    roots = [tmp_path / "eins", tmp_path / "zwei"]
+    for r in roots:
+        winmail_eml(r / "a.eml", tnef_bytes([tnef_attachment(logo(), "image001.png", variant="B"),
+                                            tnef_attachment(pdf, "Kamin.pdf")]))
+    db = tmp_path / "i.db"
+    with monkeypatch.context() as m:
+        _old_behaviour(m)
+        con = dbm.connect(db)
+        for r in roots:
+            run_index(con, [str(r)], engine=BytesEngine(), log=quiet)
+        con.close()
+    monkeypatch.setattr(sys, "argv", ["belegsuche", "--db", str(db), "suche", "Anbei Unterlagen"])
+    cli.main()                                                     # stellt um
+    out = capsys.readouterr().out
+    assert "a.eml" in out and "geändert" not in out
+    con = dbm.connect(db)
+    assert dbm.get_meta(con, "index_format") == "11"
+    assert con.execute("SELECT count(*) FROM files WHERE status != 'done'").fetchone()[0] == 0
+    text = format_report(build_report(con))
+    assert "noch offen:              0" in text
+    assert "winmail.dat (Outlook): 2 noch nicht geöffnet – der nächste Lauf von „belegsuche index“ liest sie" in text
+    log = []
+    _, ps = run_index(con, [str(roots[0])], engine=BytesEngine(), log=log.append)
+    assert ps.done == 1 and any("1 E-Mail(s) mit winmail.dat werden neu gelesen" in x for x in log)
+    status = {r[0]: r[1] for r in con.execute("SELECT r.path, f.status FROM files f JOIN roots r ON r.id = f.root_id")}
+    assert status == {str(roots[0]): "done", str(roots[1]): "done"}
+    text = format_report(build_report(con))
+    assert "winmail.dat (Outlook): 1 geöffnet, darin 1 Anhang (oben mitgezählt)" in text
+    assert "winmail.dat (Outlook): 1 noch nicht geöffnet" in text
+    _, ps = run_index(con, [], engine=BytesEngine(), log=quiet)
+    assert ps.done == 1 and "noch nicht geöffnet" not in format_report(build_report(con))
+
+
+def test_report_tells_empty_winmail_apart(tmp_path):
+    root = tmp_path / "ordner"
+    winmail_eml(root / "a.eml", tnef_bytes([tnef_attachment(logo(), "image001.png", variant="B")]))
+    winmail_eml(root / "b.eml", tnef_bytes([tnef_attachment(logo("red"), "image001.png", variant="B")]))
+    winmail_eml(root / "c.eml", tnef_bytes([]))
+    winmail_eml(root / "d.eml", tnef_bytes([tnef_attachment(photo(), "f.png", variant="C"),
+                                            tnef_attachment(pdf_bytes(tmp_path, [["Rechnung RE-23"]]), "r.pdf")]))
+    db, con, ps = index(tmp_path, root)
+    assert ("winmail.dat (Outlook): 4 geöffnet (davon 2 nur Logos, 1 ohne Anhänge), darin 2 Anhänge "
+            "(oben mitgezählt)") in format_report(build_report(con))
+
+
+def test_also_under_names_the_winmail_origin(tmp_path):
+    """„auch unter“: steht derselbe Inhalt in einer winmail.dat, heißt es „(Anhang 2 aus winmail.dat)“."""
+    root = tmp_path / "ordner"
+    pdf = pdf_bytes(tmp_path, [["Rechnung RE-24 Dachdecker Meisel"]])
+    (root / "V").mkdir(parents=True)
+    (root / "V" / "Rechnung.pdf").write_bytes(pdf)
+    winmail_eml(root / "V" / "Emails" / "m.eml", tnef_bytes([tnef_attachment(pdf, "Rechnung.pdf")]))
+    make_eml(root / "V" / "Emails" / "n.eml", text="Rechnung anbei", attachments=[("Rechnung.pdf", pdf,
+                                                                                   "application/pdf")])
+    db, con, ps = index(tmp_path, root)
+    hit = Searcher(db).search("RE-24 Dachdecker Meisel").hits[0]
+    assert hit.filename == "Rechnung.pdf" and hit.kind != "mail"
+    assert sorted(os.path.basename(d) for d in hit.duplicates) == ["m.eml (Anhang 2 aus winmail.dat)",
+                                                                   "n.eml (Anhang 1)"]
+
+
+def test_long_names_and_mime_tags_from_winmail_are_capped(tmp_path):
+    """Präparierte Namen: Millionen Zeichen landen nicht in Teil, Zeile „Anhänge:“ und Suchindex; die Endung bleibt.
+    Gilt auch für Namen von Mail-Anhängen."""
+    pdf = pdf_bytes(tmp_path, [["Rechnung RE-25 Elektro Funke"]])
+    tnef = tnef_bytes([tnef_attachment(pdf, "Ä" * 2_000_000 + ".pdf", variant="B", mime="x/" + "y" * 100_000)])
+    p = winmail_eml(tmp_path / "m.eml", tnef, extra=[("B" * 600 + ".docx", docx_bytes(["Brief"]),
+                                                      "application/octet-stream")])
+    t0 = time.time()
+    res = extract_full(p, BytesEngine())
+    assert time.time() - t0 < 5
+    names = {t.mime_path: t for t in res.parts}
+    inner, docx = names["2!1"], names["3"]
+    assert len(inner.name) == mailmod.MAX_NAME_CHARS and inner.name.endswith("….pdf") and inner.name[0] == "Ä"
+    assert len(inner.mime) <= mailmod.MAX_NAME_CHARS and inner.n_pages == 1
+    assert len(docx.name) == mailmod.MAX_NAME_CHARS and docx.name.endswith("….docx") and docx.kind == "word"
+    assert len(res.pages[0].text) < 2000
+    root = tmp_path / "ordner"
+    root.mkdir()
+    os.replace(p, root / "m.eml")
+    db, con, ps = index(tmp_path, root)
+    assert con.execute("SELECT max(length(path)) FROM fts").fetchone()[0] < 2000
+    assert Searcher(db).search("RE-25 Funke").hits[0].part_name == inner.name
+
+
+def test_many_small_crafted_winmail_in_one_mail_share_one_budget(tmp_path):
+    """30 winmail.dat in einer winmail.dat, jede mit 114.000 Eigenschaften (je unter dem Budget eines Stroms): alle
+    winmail.dat einer Mail teilen sich ein Budget – Vorabblick im Hauptprozess (attachment_shas, ohne Zeitlimit) und
+    Einlesen bleiben schnell."""
+    lst = struct.pack("<I", 19_000) + struct.pack("<HHI", 0x0003, 0x0E21, 7) * 19_000
+    inner = b"\x78\x9f\x3e\x22\x00\x00" + tnef_attr(1, 0x00069003, lst) * 6
+    pdf = pdf_bytes(tmp_path, [["Rechnung RE-26 Maler Grün"]])
+    tnef = tnef_bytes([tnef_attachment(pdf, "r.pdf")] + [tnef_attachment(inner, f"w{i}.dat", variant="C")
+                                                          for i in range(30)])
+    assert len(tnef) > 25_000_000
+    p = winmail_eml(tmp_path / "m.eml", tnef)
+    raw = p.read_bytes()
+    t0 = time.time()
+    shas = mailmod.attachment_shas(raw)
+    t_shas = time.time() - t0
+    t0 = time.time()
+    res = extract_full(p, BytesEngine())
+    t_read = time.time() - t0
+    assert t_shas < 2.0 and t_read < 2.0, (t_shas, t_read)          # je winmail.dat ein Budget: über 3 s
+    assert shas == [hashlib.sha256(pdf).hexdigest()]
+    assert res.parts[2].kind == "pdf" and res.parts[2].n_pages == 1
+    from belegsuche import tnef as tnef_mod
+    assert any(tnef_mod.BUDGET_NOTE in (t.note or "") for t in res.parts if t.kind == "tnef")
+
+
+def test_error_in_mail_text_fallback_does_not_cost_the_mail(tmp_path, monkeypatch):
+    """Der Mailtext aus der winmail.dat ist nur ein Rückfall: ein Fehler darin wird ein Hinweis, die Mail (bei der
+    Umstellung eine bisher durchsuchbare) bleibt fertig, mit ihren Anhängen."""
+    from belegsuche import tnef as tnef_mod
+
+    def broken(self):
+        raise ValueError("kaputt")
+    monkeypatch.setattr(tnef_mod.Message, "text", broken)
+    pdf = pdf_bytes(tmp_path, [["Rechnung RE-27 Fliesen Kurz"]])
+    root = tmp_path / "ordner"
+    winmail_eml(root / "m.eml", tnef_bytes([tnef_attachment(pdf, "f.pdf")]), text="")
+    db, con, ps = index(tmp_path, root)
+    assert ps.done == 1 and ps.errors == 0
+    rows = parts_of(con, ids_of(con)["m.eml"])
+    assert rows[1]["note"] == "ausgewertet: 1 Anhang; Mailtext darin nicht lesbar (ValueError)"
+    assert rows[2]["kind"] == "pdf" and rows[2]["n_pages"] == 1

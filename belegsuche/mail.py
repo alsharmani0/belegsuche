@@ -34,6 +34,8 @@ import hashlib
 import os
 import re
 import unicodedata
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
 from email import policy
@@ -56,6 +58,7 @@ MAX_MAIL_PAGES = MAX_IMAGE_PAGES          # Seiten je Mail insgesamt (wie bei me
 MIN_INLINE_IMAGE_BYTES = 10 * 1024        # kleinere Bilder im Mailtext (Signatur-Logos) nicht erkennen
 MAX_DEPTH = 2                             # angehängte Mails in angehängten Mails: so tief
 MAX_TNEF_DEPTH = 2                        # winmail.dat bzw. eingebettete Outlook-Nachricht in einer winmail.dat
+MAX_NAME_CHARS = 255                      # längere Anhangnamen werden gekürzt (Endung bleibt)
 PLACEHOLDER_MAX_BYTES = 1024
 MAX_TEXT_ATTACHMENT_BYTES = 5 * 1024 * 1024
 PLACEHOLDER_RE = re.compile(r"Die Datei '([^\n]+?)' wurde in die Dokumentenverwaltung von DOMUS (CRM|NAVI) verschoben")
@@ -74,6 +77,8 @@ NO_DATE_SUFFIX = "(Änderungsdatum der Datei – Mail ohne Datum)"
 DUPLICATE_NOTE = "gleicher Inhalt wie Anhang"
 TNEF_NAME = "winmail.dat"
 TNEF_READ = "ausgewertet"                 # Hinweis einer gelesenen winmail.dat: „ausgewertet: 3 Anhänge“
+TNEF_LOGOS_ONLY = f"{TNEF_READ}: nur Bilder im Mailtext (Logos), keine Anhänge"
+TNEF_NO_ATTACHMENTS = f"{TNEF_READ}: keine Anhänge (nur Formatierung)"
 EVALUATED_KINDS = ("pdf", "image", "word", "text", "mail")
 REUSABLE_KINDS = ("pdf", "image", "word")   # Seiten 1:1 übertragbar (gleicher Inhalt = gleiche Seiten)
 
@@ -405,8 +410,14 @@ def _filename(part: Message) -> str:
 
 
 def _plain_name(name: str | None) -> str:
-    """Nur der Dateiname, kein Pfad; ohne Steuerzeichen, Unicode NFC."""
-    return clean(name).replace("\\", "/").rsplit("/", 1)[-1] if name else ""
+    """Nur der Dateiname, kein Pfad; ohne Steuerzeichen, Unicode NFC; höchstens MAX_NAME_CHARS Zeichen (die Endung
+    bleibt). Der Name steht im Teil, in der Zeile „Anhänge:“ und im Suchindex jeder Seite des Anhangs."""
+    name = clean(name).replace("\\", "/").rsplit("/", 1)[-1] if name else ""
+    if len(name) > MAX_NAME_CHARS:
+        ext = os.path.splitext(name)[1]
+        ext = ext if len(ext) <= 16 else ""
+        name = name[:MAX_NAME_CHARS - len(ext) - 1].rstrip() + "…" + ext
+    return name
 
 
 def _disposition(part: Message) -> str | None:
@@ -659,7 +670,7 @@ def _tnef_child(parent: _Att, ta: tnef.Attachment, k: int, depth: int) -> _Att:
     """Anhang k einer winmail.dat (bzw. eingebetteten Outlook-Nachricht) als _Att, an den ersten Bytes erkannt wie
     ein Mail-Anhang. Inline (Content-ID, Kennzeichen „MHTML“, versteckt) wie ein Bild im Mailtext."""
     name = _plain_name(ta.name)
-    mime = (clean(ta.mime).lower() if ta.mime else "") or "application/octet-stream"
+    mime = (clean(ta.mime).lower()[:MAX_NAME_CHARS] if ta.mime else "") or "application/octet-stream"
     a = _Att(None, f"{parent.path}!{k}", name, mime, ta.inline, ta.data or b"", "skipped", tdepth=parent.tdepth + 1)
     if ta.truncated:
         a.hint = "unvollständig (winmail.dat abgeschnitten)"
@@ -697,10 +708,25 @@ def _tnef_child_safe(parent: _Att, ta: tnef.Attachment, k: int, depth: int) -> _
                     "skipped", note=f"nicht lesbar ({type(e).__name__})")
 
 
+# Budget für die Eigenschaftslisten aller winmail.dat einer Mail (tnef.Budget); ohne: je winmail.dat ein eigenes
+_TNEF_BUDGET: ContextVar[tnef.Budget | None] = ContextVar("tnef_budget", default=None)
+
+
+@contextmanager
+def _one_tnef_budget():
+    """Eine Mail: alle winmail.dat darin (auch in angehängten Mails und in winmail.dat) teilen sich ein Budget –
+    viele kleine präparierte winmail.dat kosten zusammen nicht mehr als eine."""
+    token = _TNEF_BUDGET.set(tnef.Budget())
+    try:
+        yield
+    finally:
+        _TNEF_BUDGET.reset(token)
+
+
 def _tnef_children(att: _Att, depth: int) -> tuple[tnef.Message, list[_Att]]:
     """Gelesene winmail.dat (bzw. eingebettete Nachricht) und ihre Anhänge in der Reihenfolge im Strom – auch die,
     die nicht gelesen werden (Logos): Anhang k hat die Adresse „<Teil>!k“."""
-    msg = tnef.parse(att.data)
+    msg = tnef.parse(att.data, _TNEF_BUDGET.get())
     return msg, [_tnef_child_safe(att, ta, k, depth) for k, ta in enumerate(msg.attachments, 1)]
 
 
@@ -708,9 +734,9 @@ def _tnef_note(msg: tnef.Message, n: int, ignored: int) -> str:
     if n:
         note = f"{TNEF_READ}: {n} Anhang" if n == 1 else f"{TNEF_READ}: {n} Anhänge"
     elif ignored:
-        note = f"{TNEF_READ}: nur Bilder im Mailtext (Logos), keine Anhänge"
+        note = TNEF_LOGOS_ONLY
     else:
-        note = f"{TNEF_READ}: keine Anhänge (nur Formatierung)"
+        note = TNEF_NO_ATTACHMENTS
     if (msg.message_class or "").upper().startswith("IPM.NOTE.SMIME"):
         note += "; verschlüsselte Outlook-Nachricht (S/MIME)"
     if msg.notes:
@@ -784,14 +810,17 @@ def _tnef_body(att: _Att) -> str:
     if msg is None:
         return ""
     before = len(msg.notes)
-    res = msg.text()
+    try:
+        res = msg.text()
+        text = "" if res is None else html_to_text(res[1]) if res[0] == "html" else res[1]
+    except MemoryError:
+        raise
+    except Exception as e:                # nur ein Rückfall: ein Fehler darin kostet nicht die ganze Mail
+        msg.notes.append(f"Mailtext darin nicht lesbar ({type(e).__name__})")
+        text = ""
     if len(msg.notes) > before and att.note:
         att.note = "; ".join([att.note, *msg.notes[before:]])
-    if res is None:
-        return ""
-    kind, content = res
-    text = html_to_text(content) if kind == "html" else content.replace("\r\n", "\n").replace("\r", "\n")
-    return text.strip()
+    return text.replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
 def _attachments(msg: Message, leaves: list[_Leaf], used: set[int], depth: int) -> list[_Att]:
@@ -866,7 +895,8 @@ def attachment_shas(data: bytes, depth: int = 0) -> list[str]:
     if not _MAYBE_ATTACHMENT_RE.search(data):       # reine Text-/HTML-Mail: nichts zu zerlegen
         return []
     try:
-        return _shas_of(_parse_fast(data), depth)
+        with _one_tnef_budget():
+            return _shas_of(_parse_fast(data), depth)
     except Exception:                  # auch RecursionError (tief verschachtelt): nur ein Vorabblick
         return []
 
@@ -1179,7 +1209,11 @@ def _head_only(raw: bytes, st: os.stat_result, ctx: _Ctx, why: str) -> Extracted
 def extract_mail(path: Path, engine, *, known: dict | None = None, safe: bool = False,
                  root: str | None = None) -> Extracted:
     """E-Mail einlesen (siehe Modulbeschreibung). Originale werden nur gelesen."""
-    path = Path(path)
+    with _one_tnef_budget():
+        return _extract_mail(Path(path), engine, known, safe, root)
+
+
+def _extract_mail(path: Path, engine, known: dict | None, safe: bool, root: str | None) -> Extracted:
     st = os.stat(path)
     notes: list[str] = []
     ctx = _Ctx(engine, known or {}, safe, notes)

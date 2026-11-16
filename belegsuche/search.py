@@ -13,7 +13,8 @@ Ablauf
    auf anderen Seiten desselben Dokuments leicht abgewertet), wie genau, und wie selten ist
    der Teil im Bestand (seltene Begriffe und Nummern zählen mehr).
 5. Inhaltsgleiche Dateien werden zusammengefasst; eine erreichbare Kopie hat Vorrang. Ein Mail-Anhang mit
-   demselben Inhalt wie eine eigenständige Datei zählt dazu („auch unter: …eml (Anhang 2)“).
+   demselben Inhalt wie eine eigenständige Datei zählt dazu („auch unter: …eml (Anhang 2)“, aus einer winmail.dat:
+   „…eml (Anhang 3 aus winmail.dat)“).
 
 E-Mails: Seite 1 ist Mailkopf + Mailtext, danach folgen die Seiten der Anhänge (Tabelle parts). Ein Treffer
 nennt den Anhang und die Seite darin; die Seiten verschiedener Anhänge stärken sich nicht gegenseitig.
@@ -1139,7 +1140,10 @@ class Searcher:
             bp = best_part(f)
             if f[1] in referring:
                 return f"{path} (Mail mit Verweis)"
-            return f"{path} (Anhang {bp[2]})" if bp is not None and bp[2] > 0 else path
+            if bp is None or bp[2] <= 0:
+                return path
+            origin = self._container_name(con, f[1], bp[6])          # Anhang in einer winmail.dat
+            return f"{path} (Anhang {bp[2]} aus {origin})" if origin else f"{path} (Anhang {bp[2]})"
 
         hits: list[Hit] = []
         for grp in order[:limit]:

@@ -162,7 +162,8 @@ def test_report_counts_mails_word_and_attachments(tmp_path, capsys):
     assert r["mails"] == 1 and r["words"] == 1 and r["unsupported"] == {".xlsx": 1}
     # die (kaputte) winmail.dat zählt getrennt
     assert r["attachments"] == {"n": 3, "evaluated": 1, "reused": 1, "links": 1, "duplicates": 0, "skipped": 0,
-                                "in_tnef": 0, "tnef": {"n": 1, "read": 0, "not_read": {"nicht lesbar": 1}}}
+                                "in_tnef": 0, "tnef": {"n": 1, "read": 0, "logos_only": 0, "no_attachments": 0,
+                                                         "not_read": {"nicht lesbar": 1}, "outdated": 0}}
     text = format_report(r)
     assert "E-Mails: 1, Word: 1" in text
     assert ("Mail-Anhänge: 1 ausgewertet, 1 übernommen (gleicher Inhalt), 1 Platzhalter (in DOMUS abgelegt), "

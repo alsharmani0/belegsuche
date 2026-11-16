@@ -915,7 +915,8 @@ def test_report_counts_duplicate_attachments_separately(tmp_path):
     db, con = index(tmp_path, root)
     r = build_report(con)
     assert r["attachments"] == {"n": 3, "evaluated": 1, "reused": 0, "links": 0, "duplicates": 1, "skipped": 1,
-                                "in_tnef": 0, "tnef": {"n": 0, "read": 0, "not_read": {}}}
+                                "in_tnef": 0, "tnef": {"n": 0, "read": 0, "logos_only": 0, "no_attachments": 0,
+                                                         "not_read": {}, "outdated": 0}}
     assert "1 nicht ausgewertet, 1 doppelt in derselben Mail" in format_report(r)
 
 

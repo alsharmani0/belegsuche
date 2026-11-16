@@ -19,9 +19,10 @@ INDEX_FORMAT = "11"          # 10: E-Mails (Tabellen parts/mails, Mailkopf in de
 # (der Index kann über 100.000 Seiten haben; die neuen Tabellen legt SCHEMA an)
 NO_REBUILD_FROM = {"9", "10"}
 # Teile, die eine frühere Version nur vermerkt hat und die diese Version liest (Format 10 → 11: winmail.dat). Mails
-# mit so einem Teil werden neu eingelesen (mark_outdated_mails); ihre übrigen Seiten übernimmt das Neulesen über die
-# sha256 der Anhänge, ohne neue Texterkennung.
+# mit so einem Teil liest der nächste Lauf von „belegsuche index“ neu (mark_outdated_mails); ihre übrigen Seiten
+# übernimmt das Neulesen über die sha256 der Anhänge, ohne neue Texterkennung. Bis dahin gilt ihr bisheriger Stand.
 OUTDATED_PART_NOTES = ("nicht ausgewertet (winmail.dat aus Outlook)",)
+TNEF_TYPES = ("application/ms-tnef", "application/vnd.ms-tnef")
 OUTDATED_IN_SQL = "(" + ", ".join("?" * len(OUTDATED_PART_NOTES)) + ")"
 FILE_TOKEN = "0f"            # + files.id, steht in der path-Spalte jeder Seite
 # Dateien, die Suche und Oberfläche anzeigen und öffnen: fertig eingelesen – oder seitdem geändert und noch
@@ -176,7 +177,8 @@ def connect(path: Path, readonly: bool = False) -> sqlite3.Connection:
                     print("Suchindex wird auf das neue Format umgestellt (einmalig, ohne neue Texterkennung) …",
                           file=sys.stderr)
                     rebuild_search_index(con)
-                mark_outdated_mails(con)
+                if old == "10":
+                    _flag_tnef_read_as_pdf(con)
             con.commit()
         return con
     except BaseException:
@@ -184,15 +186,32 @@ def connect(path: Path, readonly: bool = False) -> sqlite3.Connection:
         raise
 
 
-def mark_outdated_mails(con: sqlite3.Connection) -> int:
+def _flag_tnef_read_as_pdf(con: sqlite3.Connection) -> int:
+    """Einmalig bei der Umstellung 10 → 11: Format 10 hielt eine kleine winmail.dat, deren erster Anhang ein PDF
+    ist, für ein PDF („%PDF-“ in den ersten 1024 Bytes, vor der TNEF-Kennung geprüft) und las nur dieses PDF. Solche
+    Teile bekommen den Hinweis einer nur vermerkten winmail.dat – dann liest der nächste Lauf die Mail neu, mit allen
+    Anhängen darin. Nur hier, nicht bei jedem Lauf: ein echtes PDF namens winmail.dat würde sonst immer wieder neu
+    gelesen. Rückgabe: Anzahl."""
+    if not has_table(con, "parts"):
+        return 0
+    return con.execute(
+        "UPDATE parts SET note = ? WHERE kind = 'pdf' AND (lower(coalesce(mime, '')) IN (?, ?)"
+        " OR lower(coalesce(name, '')) = 'winmail.dat')", (OUTDATED_PART_NOTES[0], *TNEF_TYPES)).rowcount
+
+
+def mark_outdated_mails(con: sqlite3.Connection, root_ids: list[int] | None = None) -> int:
     """Fertige Mails, die ein Teil aus einer früheren Version enthalten (OUTDATED_PART_NOTES, z. B. eine nur
-    vermerkte winmail.dat), zum Neueinlesen vormerken. Ihr bisheriger Text bleibt bis dahin durchsuchbar.
+    vermerkte winmail.dat), zum Neueinlesen vormerken – nur in den Ordnern root_ids (None: alle). Aufruf zu Beginn
+    von „belegsuche index“, nicht schon bei der Umstellung: bis dahin gelten sie als fertig, nicht als geändert.
     Wiederholbar: neu eingelesene Mails haben solche Teile nicht mehr. Rückgabe: Anzahl."""
     if not has_table(con, "parts"):
         return 0
-    return con.execute(f"UPDATE files SET status = 'pending', attempts = 0 WHERE status = 'done' AND id IN"
+    scope, args = "", ()
+    if root_ids is not None:
+        scope, args = f" AND root_id IN ({','.join('?' * len(root_ids))})", tuple(root_ids)
+    return con.execute(f"UPDATE files SET status = 'pending', attempts = 0 WHERE status = 'done'{scope} AND id IN"
                        f" (SELECT file_id FROM parts WHERE note IN {OUTDATED_IN_SQL})",
-                       OUTDATED_PART_NOTES).rowcount
+                       (*args, *OUTDATED_PART_NOTES)).rowcount
 
 
 def has_outdated_parts(con: sqlite3.Connection, file_id: int) -> bool:
