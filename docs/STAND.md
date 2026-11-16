@@ -60,8 +60,12 @@ Index. Anhänge hinter einer falschen MIME-Grenze werden nicht gelesen (nur der 
   den Arbeitsprozess. Mails werden nach den übrigen Dateien eines Laufs gelesen, damit Anhänge, die auch als
   Datei im Vorgangsordner liegen, übernommen werden. Umgekehrt übernimmt eine Datei die Seiten eines gleichen
   Anhangs.
-- **Rückfall:** Nach Zeitlimit oder beim letzten Versuch nach Abstürzen wird eine Mail nur mit Mailtext gelesen
-  (Hinweis am Eintrag), statt als Fehler zu enden.
+- **Rückfall:** Hängt eine Datei, wird sie zuerst einmal allein wiederholt (Zeitlimit 2 min). Hängt eine Mail
+  wieder oder ist es der letzte Versuch nach Abstürzen, wird sie nur mit Mailtext gelesen (Hinweis am Eintrag),
+  statt als Fehler zu enden. `index` meldet solche Mails, `--fehler-wiederholen` liest sie ganz nach. Ein Stand
+  „nur Mailtext“ wird nie übernommen (weder beim Wiederholen noch für eine gleiche Kopie). Stapelspuren der
+  Hänger: `zeitlimit.log` neben der Index-Datei. Anlass: Im ersten Lauf über alle Domus-Mails hingen 2 von
+  42.951 Mails je 10 min, die allein in 1–2 s durchgingen.
 - **Suche:** Treffer in Mails nennen Teil, Seite im Teil, Betreff, Absender und Datum. Seiten verschiedener Anhänge
   stärken sich nicht gegenseitig. Derselbe Inhalt als eigene Datei und als Mail-Anhang ist ein Treffer
   („auch unter: …eml (Anhang 1)“).

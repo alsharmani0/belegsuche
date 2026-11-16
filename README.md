@@ -74,14 +74,19 @@ python3 -m venv .venv && .venv/bin/pip install -e .
 # Später: nur neue/geänderte Dateien nachziehen
 .venv/bin/belegsuche index
 
-# Dateien mit Fehlern erneut versuchen (z. B. nachdem die SSD mitten im Lauf abgezogen wurde)
+# Dateien mit Fehlern erneut versuchen (z. B. nachdem die SSD mitten im Lauf abgezogen wurde),
+# dazu Mails, die nach Zeitlimit oder Absturz nur mit dem Mailtext eingelesen wurden
 .venv/bin/belegsuche index --fehler-wiederholen
 ```
 
 Die Texterkennung läuft parallel in mehreren Prozessen (Standard: Anzahl Kerne − 2, höchstens 8;
 ändern mit `--parallel N`). Ein zweiter gleichzeitiger Einlese-Lauf wird abgelehnt. Hängt eine Datei
-(10 Minuten lang keine Seite fertig), werden die Prozesse neu gestartet und die Datei als Fehler gemeldet; die
-übrigen Dateien werden danach weiter eingelesen. Das gilt nur für die parallele Verarbeitung, nicht für `--parallel 1`.
+(10 Minuten lang keine Seite fertig), werden die Prozesse neu gestartet und die Datei wird einmal allein wiederholt
+(Zeitlimit dann 2 Minuten) – unter Last hängt Vision gelegentlich bei Dateien, die allein in Sekunden durchgehen.
+Hängt sie wieder, ist sie ein Fehler; eine E-Mail wird dann nur mit dem Mailtext eingelesen, ihre PDF- und
+Bild-Anhänge holt `--fehler-wiederholen` später nach. Die übrigen Dateien werden weiter eingelesen. Die Stapelspur
+jedes Hängers steht in `zeitlimit.log` neben der Index-Datei. Das gilt nur für die parallele Verarbeitung, nicht für
+`--parallel 1`.
 
 Sobald ein Einlese-Lauf eine Änderung erkennt, bleibt die Datei mit ihrem bisherigen Text auffindbar, bis der
 neue Text fertig ist. In dieser Zeit kennzeichnet die Suche sie mit „geändert – wird neu eingelesen“.

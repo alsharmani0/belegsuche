@@ -42,6 +42,8 @@ BUMP_EVERY_FILES = 50        # laufende Suchserver sehen Neues spätestens nach 
 BUMP_EVERY_SECONDS = 60      # … oder so vielen Sekunden
 MAX_TASKS_PER_WORKER = 50    # Arbeitsprozess danach neu starten (gibt Speicher von Vision/pdfium sicher frei)
 STALL_TIMEOUT = 600          # Sekunden ohne fertige Seite -> Datei hängt (pdfium/Vision), Arbeitsprozess wird beendet
+STALL_TIMEOUT_RETRY = 120    # zweiter Versuch einer hängenden Datei, allein: so lange dauert keine einzelne Seite
+HANG_LOG = "zeitlimit.log"   # Stapelspuren hängender Dateien, neben der Index-Datei (zur Fehlersuche)
 ROOT_LOST_MSG = ("Ordner nicht mehr erreichbar (SSD getrennt?) – Einlesen angehalten. "
                  "Nach dem Anschließen erneut starten.")
 
@@ -550,8 +552,27 @@ def retry_errors(con, include_permanent: bool = False, *, root_ids: list[int] | 
     sql += scope
     args += root_args
     n = con.execute(sql, args).rowcount
+    # Mails, die nach Zeitlimit oder Absturz nur mit dem Mailtext eingelesen wurden: Anhänge noch einmal versuchen
+    n += con.execute(f"UPDATE files SET status='pending', attempts=0, error=NULL WHERE status='done' AND {_SAFE_MAILS}"
+                     + scope,
+                     (_safe_note(), *root_args)).rowcount
     con.commit()
     return n
+
+
+_SAFE_MAILS = "id IN (SELECT file_id FROM parts WHERE note = ?)"
+
+
+def _safe_note() -> str:
+    from .mail import SAFE_NOTE
+    return SAFE_NOTE
+
+
+def count_safe_mails(con, root_ids: list[int] | None = None) -> int:
+    """Mails, deren PDF-/Bild-Anhänge nach Zeitlimit oder Absturz nicht gelesen wurden (nur Mailtext)."""
+    scope, args = _root_scope(root_ids)
+    return con.execute(f"SELECT count(*) FROM files WHERE status='done' AND {_SAFE_MAILS}" + scope,
+                       (_safe_note(), *args)).fetchone()[0]
 
 
 def _reset_crashed(con, root_ids: list[int] | None = None) -> None:
@@ -598,11 +619,16 @@ def _prepare(con, r):
     s = os.stat(full)
     sha = sha256_file(full)
     none: frozenset[str] = frozenset()
-    if r["sha256"] == sha and con.execute("SELECT 1 FROM pages WHERE file_id=? LIMIT 1", (fid,)).fetchone():
+    # Ein Stand „nur Mailtext“ (Rückfall nach Zeitlimit/Absturz) wird nie übernommen: weder beim Wiederholen
+    # derselben Mail noch für eine gleiche Kopie – sonst fehlten die Anhänge dauerhaft
+    if r["sha256"] == sha and con.execute("SELECT 1 FROM pages WHERE file_id=? LIMIT 1", (fid,)).fetchone() \
+            and not con.execute("SELECT 1 FROM parts WHERE file_id=? AND note=? LIMIT 1", (fid, _safe_note())).fetchone():
         return s, sha, _stored(con, fid), True, None, none
     src = con.execute(
         "SELECT f.id FROM files f WHERE f.sha256 = ? AND f.id != ? AND f.status IN ('done', 'missing')"
-        " AND EXISTS (SELECT 1 FROM pages p WHERE p.file_id = f.id) LIMIT 1", (sha, fid)).fetchone()
+        " AND EXISTS (SELECT 1 FROM pages p WHERE p.file_id = f.id)"
+        " AND NOT EXISTS (SELECT 1 FROM parts t WHERE t.file_id = f.id AND t.note = ?) LIMIT 1",
+        (sha, fid, _safe_note())).fetchone()
     if src:
         res = _stored(con, src[0])
         if _is_mail(r):
@@ -864,7 +890,7 @@ def _extract_job(path: str, marker: str | None = None, stall_timeout: float | No
         arm()
         extract_mod.on_page_done = arm
         hang_on = os.environ.get("BELEGSUCHE_TEST_HANG_ON")   # nur für Tests: Hänger in C-Code simulieren
-        if hang_on and path.endswith(hang_on) and not safe:
+        if hang_on and path.endswith(hang_on) and not safe and _test_hang_now():
             import ctypes
             ctypes.PyDLL(None).sleep(3600)   # blockiert wie ein hängender Bibliotheksaufruf (hält den GIL)
         return run()
@@ -878,12 +904,47 @@ def _extract_job(path: str, marker: str | None = None, stall_timeout: float | No
             pass
 
 
+def _test_hang_now() -> bool:
+    """Nur für Tests: mit BELEGSUCHE_TEST_HANG_ONCE_FLAG hängt die Datei nur beim ersten Versuch (wie ein
+    gelegentlicher Hänger unter Last), sonst bei jedem."""
+    flag = os.environ.get("BELEGSUCHE_TEST_HANG_ONCE_FLAG")
+    if not flag:
+        return True
+    try:
+        os.close(os.open(flag, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        return True
+    except FileExistsError:
+        return False
+
+
 def _timed_out(marker: str) -> bool:
     """Hat der Arbeitsprozess wegen Zeitüberschreitung aufgegeben (siehe _extract_job)?"""
     try:
         return os.path.getsize(marker) > 0
     except OSError:
         return False
+
+
+def _stall_timeout(r) -> float:
+    """Zeitlimit ohne Fortschritt: beim Wiederholen einer hängenden Datei (allein) kürzer."""
+    return min(STALL_TIMEOUT, STALL_TIMEOUT_RETRY) if _row_get(r, "hang_retry") else STALL_TIMEOUT
+
+
+def _log_hang(con, r, marker: str) -> None:
+    """Stapelspur einer hängenden Datei in HANG_LOG neben der Index-Datei sichern – der Ordner mit den
+    Markierungsdateien wird am Ende des Laufs gelöscht, die Ursache wäre sonst nicht mehr zu sehen."""
+    try:
+        with open(marker, errors="replace") as f:
+            trace = f.read(20000)
+        db_file = con.execute("PRAGMA database_list").fetchone()[2]
+        if not db_file:
+            return
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        attempt = "Wiederholung allein" if _row_get(r, "hang_retry") else "erster Versuch"
+        with open(os.path.join(os.path.dirname(db_file), HANG_LOG), "a", encoding="utf-8") as out:
+            out.write(f"--- {stamp}  {r['relpath']}  ({attempt}, Zeitlimit {_stall_timeout(r):g} s)\n{trace.rstrip()}\n\n")
+    except Exception:
+        pass   # nur zur Fehlersuche – darf das Einlesen nie stören
 
 
 def _timeout_msg() -> str:
@@ -1008,8 +1069,8 @@ def _process_parallel_run(con, todo, engine_name: str, workers: int, prog: _Prog
                     waiting.setdefault(min(busy), []).append(r)
                     continue
                 try:
-                    fut = pool.submit(_extract_job, os.path.join(r["root"], r["relpath"]), marker(r), STALL_TIMEOUT,
-                                      known, _safe_mode(r), r["root"])
+                    fut = pool.submit(_extract_job, os.path.join(r["root"], r["relpath"]), marker(r),
+                                      _stall_timeout(r), known, _safe_mode(r), r["root"])
                 except BrokenProcessPool:
                     # Ein Arbeitsprozess ist abgestürzt, während diese Datei vorbereitet wurde
                     broken_at_submit, broken_from_solo = r, from_solo
@@ -1065,10 +1126,19 @@ def _process_parallel_run(con, todo, engine_name: str, workers: int, prog: _Prog
                     raise _RootLost(crashed[0]["root"])   # SSD weg: die Dateien sind nicht schuld
                 hung = {r["id"] for r in crashed if _timed_out(marker(r))}
                 if hung:
-                    # Schuldige Datei(en) bekannt: nur sie als Fehler, die übrigen ohne Versuch zurück in die Reihe.
-                    # Eine E-Mail bekommt noch einen Versuch nur mit dem Mailtext (ohne PDF-/Bild-Anhänge).
+                    # Schuldige Datei(en) bekannt, die übrigen ohne Versuch zurück in die Reihe. Unter Last hängt
+                    # Vision/pdfium gelegentlich bei Dateien, die allein in Sekunden durchgehen: die hängende Datei
+                    # wird deshalb zuerst einmal allein wiederholt (kürzeres Zeitlimit). Hängt sie wieder, wird eine
+                    # E-Mail nur mit dem Mailtext (ohne PDF-/Bild-Anhänge) eingelesen, jede andere Datei ist Fehler.
                     for r in crashed:
-                        if r["id"] in hung and _is_mail(r) and not _safe_mode(r):
+                        if r["id"] in hung:
+                            _log_hang(con, r, marker(r))
+                        if r["id"] in hung and not _row_get(r, "hang_retry") and not _safe_mode(r):
+                            con.execute("UPDATE files SET status='pending' WHERE id=?", (r["id"],))
+                            con.commit()
+                            solo.append(dict(r) | {"hang_retry": True})
+                            prog.log(f"   {r['relpath']} – Zeitlimit, wird allein wiederholt")
+                        elif r["id"] in hung and _is_mail(r) and not _safe_mode(r):
                             con.execute("UPDATE files SET status='pending' WHERE id=?", (r["id"],))
                             con.commit()
                             solo.append(dict(r) | {"safe": True})

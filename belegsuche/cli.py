@@ -114,7 +114,7 @@ def _interrupt(signum, frame):
 
 
 def cmd_index(args) -> int:
-    from .indexer import PERMANENT_ERRORS, acquire_lock, run_index
+    from .indexer import PERMANENT_ERRORS, acquire_lock, count_safe_mails, run_index
     path = _db(args)
     roots = [Path(p).expanduser() for p in args.ordner]
     if path.is_file() and path.stat().st_size:
@@ -140,6 +140,7 @@ def cmd_index(args) -> int:
                     " AND coalesce(error,'') NOT LIKE 'Word-Datei nicht lesbar%'"
                     f" AND coalesce(error,'') NOT IN ({','.join('?' for _ in PERMANENT_ERRORS)})",
                     PERMANENT_ERRORS).fetchone()[0]
+                safe_mails = count_safe_mails(con)
         except KeyboardInterrupt:
             print("\nUnterbrochen. Beim nächsten Start geht es an derselben Stelle weiter.")
             return 130
@@ -156,6 +157,9 @@ def cmd_index(args) -> int:
         print(f"{ps.skipped_offline} Dateien warten auf einen nicht verbundenen Ordner.")
     if retryable:
         print(f"{retryable} Datei(en) mit Fehler später erneut versuchen: belegsuche index --fehler-wiederholen")
+    if safe_mails:
+        print(f"{safe_mails} Mail(s) nur mit Mailtext eingelesen (Anhänge nach Zeitlimit oder Absturz übersprungen) – "
+              "später erneut versuchen: belegsuche index --fehler-wiederholen")
     print("Überblick: belegsuche bericht   ·   Suchen: belegsuche start")
     return 0
 
