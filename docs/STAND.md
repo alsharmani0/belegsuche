@@ -21,6 +21,12 @@ getrennt aufgeführt: Die beiden alten Fragenlisten sind kein Blindtest für den
   stärken sich nicht gegenseitig. Derselbe Inhalt als eigene Datei und als Mail-Anhang ist ein Treffer
   („auch unter: …eml (Anhang 1)“).
 
+**Verifiziert:** 648 Tests grün (lokal, Python 3.12.14, macOS, mit Apples Texterkennung), davon 61 neue mit
+erfundenen Mails und Word-Dateien. Lesetest auf einem echten Bestand, nur lesend und ohne Texterkennung: eine
+Stichprobe von 10.000 Mails und 400 Word-Dateien ohne Fehler, Mail im Median 4 ms, docx 2 ms, doc 49 ms.
+Inhalt und Änderungszeit der gelesenen Dateien blieben unverändert. Öffnen von Mails und Anhängen in der
+Oberfläche ist nicht Teil dieses Schritts.
+
 ## Projektprüfung vom 11.11.2026
 
 - **Einlesen:** Ein vorübergehend nicht lesbarer Dateieintrag gilt nicht als gelöscht. Ein während der

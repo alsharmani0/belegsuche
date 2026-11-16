@@ -217,7 +217,8 @@ def indexed(corpus, tmp_path):
 
 # --- E-Mails und Word (nur erfundene Daten, Adressen auf .example) --------------------------------------
 
-def make_eml(path: Path, *, subject: str | None = "Rechnung", sender: str | None = "Erika Beispiel <erika@firma.example>",
+def make_eml(path: Path, *, subject: str | None = "Rechnung",
+             sender: str | None = "Erika Beispiel <erika@firma.example>",
              to: str | None = "Hausverwaltung Nord <info@hv-nord.example>", cc: str | None = None,
              date: str | None = "Fri, 12 Mar 2021 14:05:00 +0100", text: str | None = None, html: str | None = None,
              attachments=(), inline=(), headers: dict | None = None) -> Path:

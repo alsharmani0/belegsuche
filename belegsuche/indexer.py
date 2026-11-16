@@ -465,7 +465,8 @@ def _pages_for_sha(con, sha: str) -> list[PageText] | None:
     row = con.execute(
         "SELECT t.file_id, t.first_page, t.n_pages FROM parts t JOIN files f ON f.id = t.file_id"
         " WHERE t.sha256 = ? AND t.n_pages > 0 AND t.first_page IS NOT NULL AND t.kind IN (?, ?, ?)"
-        " AND (t.note IS NULL OR t.note = ?) AND f.status = 'done' LIMIT 1", (sha, *REUSE_KINDS, REUSED_NOTE)).fetchone()
+        " AND (t.note IS NULL OR t.note = ?) AND f.status = 'done' LIMIT 1",
+        (sha, *REUSE_KINDS, REUSED_NOTE)).fetchone()
     if row:
         pages = _pages_of(con, row[0], row[1], row[1] + row[2] - 1)
         if len(pages) == row[2]:
