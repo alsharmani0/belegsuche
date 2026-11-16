@@ -349,8 +349,23 @@ def test_domus_placeholder_name_search_prefers_the_linked_file(tmp_path):
              "application/octet-stream")])
     db, _ = index(tmp_path, root)
     hits = Searcher(db).search("Mietvertrag Kowalski").hits
-    assert hits[0].filename == "Mietvertrag Kowalski.pdf"
-    assert {h.filename for h in hits[1:]} == {"m0.eml", "m1.eml", "m2.eml"}      # die Mails bleiben auffindbar
+    assert [h.filename for h in hits] == ["Mietvertrag Kowalski.pdf"]
+    assert sorted(os.path.basename(d) for d in hits[0].duplicates) == [   # die Mails: „auch unter“
+        "m0.eml (Mail mit Verweis)", "m1.eml (Mail mit Verweis)", "m2.eml (Mail mit Verweis)"]
+    assert Searcher(db).search("Vorgang 1").hits[0].filename == "m1.eml"      # eigene Suche: die Mail
+
+
+def test_mail_text_that_matches_better_stays_ahead_of_the_linked_file(tmp_path):
+    root = tmp_path / "ordner"
+    act = root / "090005"
+    act.mkdir(parents=True)
+    digital_pdf(act / "Mietvertrag Kowalski.pdf", [["Vertragsurkunde Stellplatz 4", *FILL]])
+    make_eml(act / "Emails" / "m.eml", subject="Kündigung Stellplatz", text="Kowalski kündigt den Stellplatz",
+             attachments=[("x.pdf.txt", PLACEHOLDER.format("Mietvertrag Kowalski.pdf").encode(),
+                           "application/octet-stream")])
+    db, _ = index(tmp_path, root)
+    hits = Searcher(db).search("Kowalski Kündigung").hits     # nur die Mail enthält beides
+    assert hits[0].filename == "m.eml" and not hits[0].duplicates
 
 
 def test_unevaluated_attachment_name_still_finds_the_mail(tmp_path):

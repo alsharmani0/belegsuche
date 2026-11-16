@@ -61,6 +61,7 @@ PROX_BONUS, PROX_SPAN = 0.03, 40   # Suchbegriffe nah beieinander (gleiche Tabel
 DOC_START_MARKERS = (" seite 1 von ", " blatt 1 von ", " seite 1 1 ")
 QUANTIFIERS = {"alle", "allen", "saemtliche", "saemtlichen", "jede", "jeder", "jedes", "gesamte", "gesamten"}
 SCOPE_FACTOR = 0.3
+REF_MERGE_MARGIN = 0.1       # Mail, die eine Datei nur nennt (Platzhalter, gleicher Anhang): Datei vorn, wenn fast gleich gut
 
 
 @dataclass
@@ -886,6 +887,37 @@ class Searcher:
         return out
 
     @staticmethod
+    def _mail_refs(con, mails: list, meta: dict) -> dict[int, set[int]]:
+        """Mails (Fundstelle im Mailtext) -> Dateien unter den Treffern, auf die sie verweisen: Ziel eines
+        DOMUS-Platzhalters oder eigenständige Datei mit demselben Inhalt wie ein Anhang. Ohne Tabelle parts leer."""
+        out: dict[int, set[int]] = defaultdict(set)
+        if not mails or not dbm.has_table(con, "parts"):
+            return out
+        by_path: dict[tuple, int] = {}
+        by_sha: dict[str, list[int]] = defaultdict(list)
+        for m in meta.values():
+            if m["kind"] == "mail":
+                continue
+            by_path[(m["root_id"], unicodedata.normalize("NFC", m["relpath"]).casefold())] = m["file_id"]
+            if m["sha256"]:
+                by_sha[m["sha256"]].append(m["file_id"])
+        root_of = {f[1]: meta[f[2]]["root_id"] for f in mails}
+        fids = list(root_of)
+        for chunk in range(0, len(fids), 900):
+            ids_ = fids[chunk:chunk + 900]
+            for fid, kind, note, sha in con.execute(
+                    "SELECT file_id, kind, note, sha256 FROM parts WHERE part_no > 0 AND ((kind = 'link' AND note IS NOT"
+                    " NULL) OR (kind IN ('pdf', 'image', 'word') AND sha256 IS NOT NULL))"
+                    f" AND file_id IN ({','.join('?' * len(ids_))})", ids_):
+                if kind == "link":
+                    t = by_path.get((root_of[fid], unicodedata.normalize("NFC", note).casefold()))
+                    if t is not None:
+                        out[fid].add(t)
+                else:
+                    out[fid].update(by_sha.get(sha, ()))
+        return out
+
+    @staticmethod
     def _part_at(parts: list[tuple], page_no: int) -> tuple | None:
         i = bisect.bisect_right([p[0] for p in parts], page_no) - 1
         return parts[i] if i >= 0 and parts[i][0] <= page_no <= parts[i][1] else None
@@ -1040,16 +1072,33 @@ class Searcher:
             fparts = mail_parts.get(f[1])
             return self._part_at(fparts, meta[f[2]]["page_no"]) if fparts else None
 
+        #    Liegt sie im Mailtext und verweist die Mail auf eine Datei, die fast genauso gut passt (DOMUS-Platzhalter
+        #    oder Anhang mit demselben Inhalt), steht die Datei vorn und die Mail unter „auch unter“: die Suche nach
+        #    einem Dateinamen soll die Datei liefern, nicht die Mail, die sie nur nennt.
+        refs = self._mail_refs(con, [f for f in files if (bp := best_part(f)) is not None and bp[2] == 0], meta)
+        entry_of = {f[1]: f for f in files}
+        preferred: dict[int, int] = {}       # id(Gruppe) -> Datei, die Haupttreffer wird
+        referring: set[int] = set()          # Mails, die über einen Verweis in der Gruppe einer Datei stehen
         for f in files:
             sha = meta[f[2]]["sha256"] or f"file{f[1]}"
             bp = best_part(f)
             if bp is not None and bp[5] and bp[4] in ("pdf", "image", "word"):
                 sha = bp[5]
+            target = None
+            cands = [entry_of[t] for t in refs.get(f[1], ()) if t in entry_of]
+            cands = [c for c in cands if c[0] >= f[0] - REF_MERGE_MARGIN
+                     and all(cw > 0 for cw, fw in zip(c[3], f[3]) if fw > 0)]
+            if cands:
+                target = max(cands, key=lambda c: c[0])
+                sha = meta[target[2]]["sha256"] or f"file{target[1]}"
+                referring.add(f[1])
             if sha in groups_by_sha:
                 groups_by_sha[sha].append(f)
             else:
                 groups_by_sha[sha] = [f]
                 order.append(groups_by_sha[sha])
+            if target is not None:
+                preferred.setdefault(id(groups_by_sha[sha]), target[1])
         order = order[:TF_TOP]
 
         # 5. Nähe der Suchbegriffe zueinander (kleiner Bonus) und bei Gleichstand: Häufigkeit der Begriffe
@@ -1087,6 +1136,8 @@ class Searcher:
             m = meta[f[2]]
             path = os.path.join(m["root"], m["relpath"])
             bp = best_part(f)
+            if f[1] in referring:
+                return f"{path} (Mail mit Verweis)"
             return f"{path} (Anhang {bp[2]})" if bp is not None and bp[2] > 0 else path
 
         hits: list[Hit] = []
@@ -1095,7 +1146,8 @@ class Searcher:
             # eine eigenständige Datei vor demselben Inhalt als Mail-Anhang (lässt sich direkt öffnen) – aber nur,
             # wenn sie genauso gut passt (der Absender einer Mail steht nicht in der Rechnung selbst)
             ok = [f for f in grp if meta[f[2]]["status"] == "done" and available(meta[f[2]])]
-            main = next((f for f in ok if best_part(f) is None and f[0] >= ok[0][0] - 1e-9), None) \
+            main = next((f for f in ok if f[1] == preferred.get(id(grp))), None) \
+                or next((f for f in ok if best_part(f) is None and f[0] >= ok[0][0] - 1e-9), None) \
                 or next(iter(ok), None) or next((f for f in grp if available(meta[f[2]])), grp[0])
             score, fid, rid, W = main
             m = meta[rid]
