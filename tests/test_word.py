@@ -139,6 +139,20 @@ def test_broken_docx_and_xml_entities_are_rejected(tmp_path):
 
 
 @needs_textutil
+def test_malformed_docx_xml_falls_back_to_textutil(tmp_path):
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:            # wie der künstliche Testbestand: Präfix ohne Namensraum
+        z.writestr("[Content_Types].xml", '<?xml version="1.0"?><Types/>')
+        z.writestr("word/document.xml", "<w:document><!-- Mietvertrag Entwurf --></w:document>")
+    f = tmp_path / "Entwurf.docx"
+    f.write_bytes(buf.getvalue())
+    pages, _ = extract_with_notes(f, None)
+    assert [(p.page_no, p.text) for p in pages] == [(1, "")]
+
+
+@needs_textutil
 def test_index_word_files_searchable_and_originals_untouched(tmp_path):
     root = tmp_path / "ordner"
     root.mkdir()

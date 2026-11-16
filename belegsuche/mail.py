@@ -471,9 +471,22 @@ def _classify(lf: _Leaf, depth: int) -> _Att:
     return att
 
 
+def _classify_safe(lf: _Leaf, depth: int) -> _Att:
+    try:
+        return _classify(lf, depth)
+    except MemoryError:
+        raise
+    except Exception as e:            # kaputter Teil: nur dieser Anhang fehlt, nicht die ganze Mail
+        try:
+            mime = lf.part.get_content_type()
+        except Exception:
+            mime = "application/octet-stream"
+        return _Att(lf.part, lf.path, "", mime, False, b"", "skipped", note=f"nicht lesbar ({type(e).__name__})")
+
+
 def _attachments(msg: Message, leaves: list[_Leaf], used: set[int], depth: int) -> list[_Att]:
     return [att for lf in leaves if id(lf.part) not in used and lf.text is None
-            for att in [_classify(lf, depth)] if att.kind != "ignore"]
+            for att in [_classify_safe(lf, depth)] if att.kind != "ignore"]
 
 
 def parse(data: bytes) -> Message:

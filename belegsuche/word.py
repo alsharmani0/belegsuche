@@ -36,6 +36,10 @@ _PART_RE = re.compile(r"word/(header|footer)(\d*)\.xml$")
 _ODT_MIME = b"application/vnd.oasis.opendocument.text"
 
 
+class _XmlBroken(ExtractError):
+    """XML eines docx-Teils ist nicht wohlgeformt (dann versucht es textutil)."""
+
+
 def _xml_text(data: bytes) -> str:
     """Sichtbarer Text eines WordprocessingML-Teils. Absätze werden Zeilen, Tabellenzellen durch Tab getrennt,
     harte Seitenumbrüche werden \\f. Ersatzdarstellungen (mc:Fallback) werden übersprungen – sonst stünde der
@@ -45,7 +49,7 @@ def _xml_text(data: bytes) -> str:
     try:
         root = ET.fromstring(data)
     except ET.ParseError as e:
-        raise ExtractError(f"Word-Datei beschädigt oder nicht lesbar ({e})") from e
+        raise _XmlBroken(f"Word-Datei beschädigt oder nicht lesbar ({e})") from e
     out: list[str] = []
     stack: list[tuple[ET.Element, bool]] = [(root, False)]
     while stack:                      # ohne Rekursion: tief verschachtelte Dateien sprengen den Stapel nicht
@@ -167,7 +171,14 @@ def word_text(data: bytes, notes: list[str]) -> list[str]:
             with zipfile.ZipFile(io.BytesIO(data)) as z:
                 names = z.namelist()
                 if "word/document.xml" in names:
-                    return _docx_text(z, notes)
+                    try:
+                        return _docx_text(z, notes)
+                    except _XmlBroken as e:            # nicht wohlgeformt: textutil ist nachsichtiger
+                        broken = e
+                    try:
+                        return _textutil(data, "docx").split("\f")
+                    except ExtractError:
+                        raise broken from None
                 if "mimetype" in names and _read_member(z, "mimetype").strip() == _ODT_MIME:
                     return _textutil(data, "odt").split("\f")
         except zipfile.BadZipFile as e:
