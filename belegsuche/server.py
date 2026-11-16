@@ -1,18 +1,31 @@
-"""Lokale Suchoberfläche im Browser (nur auf diesem Mac erreichbar: 127.0.0.1)."""
+"""Lokale Suchoberfläche im Browser (nur auf diesem Mac erreichbar: 127.0.0.1).
+
+E-Mails: „Mail öffnen“ öffnet die .eml mit Apple Mail. „Anhang öffnen“ liest die Mail neu (nur lesend), sucht den
+Teil über parts.mime_path, prüft die sha256 und schreibt ihn schreibgeschützt in einen eigenen Ordner im
+System-Temp (nie neben die Mail, nie in einen eingelesenen Ordner). /datei/<id>/teil/<n> liefert PDF- und
+Bild-Anhänge direkt aus dem Speicher (für „Seite Y im Browser“). Mails, Word-Dateien und alle Typen außerhalb
+einer kleinen Liste gehen nur als Download mit CSP sandbox hinaus, nie als Seite im Ursprung der Oberfläche.
+"""
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import mimetypes
 import os
+import re
+import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
+import time
+import unicodedata
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from . import db as dbm
 from .search import Searcher
@@ -27,22 +40,50 @@ MAX_BODY = 10_000
 # Adresszeile/Lesezeichen/webbrowser.open schicken none, ältere Browser gar nichts.
 ALLOWED_FETCH_SITES = (None, "same-origin", "none")
 CSP_DEFAULT = "frame-ancestors 'none'"
+# Downloads (Mails, Word, unbekannte Typen): selbst wenn ein Browser sie doch anzeigt, läuft darin nichts
+CSP_ATTACHMENT = "sandbox; default-src 'none'; frame-ancestors 'none'"
+CSP_IMAGE = "sandbox; frame-ancestors 'none'"
 CSP_UI = ("default-src 'none'; img-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; "
           "base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 # Pfad darf nirgends (macOS: auch nicht in übergeordneten Ordnern) ein Symlink sein; O_NOFOLLOW_ANY
 # und O_NOFOLLOW zusammen ergeben EINVAL. O_NONBLOCK, damit eine untergeschobene Named Pipe das
 # Öffnen nicht blockiert (bei normalen Dateien wirkungslos).
 OPEN_FLAGS = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW_ANY", os.O_NOFOLLOW)
+# Neue Temp-Datei: nur neu anlegen (keine vorhandene, kein Symlink überschreiben)
+WRITE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+# /datei/<id>: nur diese Typen werden im Browser angezeigt, alles andere ist ein Download
+INLINE_FILE_TYPES = {"application/pdf", "image/png", "image/jpeg", "image/gif", "image/webp", "image/tiff",
+                     "image/bmp", "image/heic", "image/heif"}
+DOWNLOAD_KINDS = ("mail", "word")
+# Anhänge: Art nur an den ersten Bytes (mail/extract.sniff), nie an der Angabe in der Mail
+PART_EXT = {"pdf": ".pdf", "png": ".png", "jpeg": ".jpg", "gif": ".gif", "tiff": ".tif", "heic": ".heic",
+            "bmp": ".bmp", "webp": ".webp", "rtf": ".rtf", "docx": ".docx", "odt": ".odt", "doc": ".doc",
+            "txt": ".txt"}
+PART_INLINE = {"pdf": "application/pdf", "png": "image/png", "jpeg": "image/jpeg", "gif": "image/gif",
+               "webp": "image/webp"}
+OPENABLE_PARTS = ("pdf", "image", "word", "text")      # parts.kind, die sich öffnen lassen
+MAX_PART_NO = 10_000
+ATTACH_PREFIX = "belegsuche-anhang-"
+ATTACH_MAX_AGE = 24 * 3600            # ältere Reste im Temp-Ordner räumt der nächste Start weg
+MAX_NAME_CHARS = 100
+MAIL_APP = "com.apple.mail"
+MAIL_CHANGED = "Mail geändert – neu einlesen"
 
 
 def _file_row(db_path: Path, file_id: int):
     con = dbm.connect(db_path, readonly=True)
     try:
         return con.execute(
-            "SELECT f.relpath, f.status, r.path AS root FROM files f JOIN roots r ON r.id = f.root_id WHERE f.id = ?",
-            (file_id,)).fetchone()
+            "SELECT f.relpath, f.status, f.kind, r.path AS root FROM files f JOIN roots r ON r.id = f.root_id"
+            " WHERE f.id = ?", (file_id,)).fetchone()
     finally:
         con.close()
+
+
+def _file_kind(db_path: Path, file_id: int) -> str | None:
+    row = _file_row(db_path, file_id)
+    return row["kind"] if row is not None else None
 
 
 def _resolve(db_path: Path, file_id: int) -> tuple[str | None, str | None]:
@@ -66,7 +107,186 @@ def _valid_id(v) -> bool:
     return type(v) is int and 1 <= v <= MAX_ID
 
 
-def make_handler(searcher: Searcher, port: int):
+def _valid_part(v) -> bool:
+    return type(v) is int and 1 <= v <= MAX_PART_NO
+
+
+# --- Dateinamen und Temp-Ordner -------------------------------------------------------------------
+
+def _clean_name(name: str | None) -> str:
+    """Nur der Basisname, ohne Steuer- und Formatzeichen (auch Richtungswechsel U+202E), ohne führende Punkte."""
+    name = unicodedata.normalize("NFC", str(name or ""))
+    name = name.replace("\\", "/").rsplit("/", 1)[-1]
+    name = "".join(c for c in name if unicodedata.category(c) not in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"))
+    name = re.sub(r"\s+", " ", name.replace(":", "_")).strip()
+    return name.lstrip(". ").rstrip(". ")
+
+
+def safe_filename(name: str | None, ext: str) -> str:
+    """Dateiname für eine Temp-Kopie: bereinigter Basisname, gekürzt, Endung aus den ersten Bytes (ext)."""
+    stem = _clean_name(name)
+    base, old = os.path.splitext(stem)
+    if re.fullmatch(r"\.[A-Za-z0-9]{1,5}", old) and re.search(r"[A-Za-z]", old):
+        stem = base                              # angegebene Endung zählt nicht, die ersten Bytes zählen
+    stem = stem[:MAX_NAME_CHARS].rstrip(". ") or "Anhang"
+    return stem + ext
+
+
+def _content_disposition(kind: str, name: str) -> str:
+    plain = "".join(c if 32 <= ord(c) < 127 and c not in '"\\;%' else "_" for c in name) or "datei"
+    return f"{kind}; filename=\"{plain}\"; filename*=UTF-8''{quote(name, safe='')}"
+
+
+def _inside(path: str, root: str) -> bool:
+    """Liegt path in root (oder ist root)? Ohne Symlinks, auch bei anderer Groß-/Kleinschreibung."""
+    rp, rr = os.path.realpath(path), os.path.realpath(root)
+    for a, b in ((rp, rr), (rp.casefold(), rr.casefold())):
+        if a == b or a.startswith(b.rstrip("/") + "/"):
+            return True
+    if os.path.isdir(rr):
+        p = rp
+        while True:
+            try:
+                if os.path.exists(p) and os.path.samefile(p, rr):
+                    return True
+            except OSError:
+                pass
+            parent = os.path.dirname(p)
+            if parent == p:
+                break
+            p = parent
+    return False
+
+
+class TempRefused(Exception):
+    """Temp-Ordner läge in einem eingelesenen Ordner – dann wird nichts geschrieben."""
+
+
+class AttachmentTemp:
+    """Temp-Kopien geöffneter Anhänge: je Anhang ein eigener Ordner (0700) unter $TMPDIR, Datei 0400.
+    Aufgeräumt wird beim Ende des Servers; Reste älter als 24 h beim nächsten Start."""
+
+    def __init__(self):
+        self._dirs: list[str] = []
+        self._lock = threading.Lock()
+
+    def write(self, name: str, data: bytes, roots: list[str]) -> str:
+        base = tempfile.gettempdir()
+        for r in roots:
+            if _inside(base, r):
+                raise TempRefused(r)
+        d = tempfile.mkdtemp(prefix=ATTACH_PREFIX, dir=base)
+        with self._lock:
+            self._dirs.append(d)
+        os.chmod(d, 0o700)
+        if any(_inside(d, r) for r in roots):
+            shutil.rmtree(d, ignore_errors=True)
+            raise TempRefused(d)
+        path = os.path.join(d, name)
+        fd = os.open(path, WRITE_FLAGS, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.chmod(path, 0o400)
+        return path
+
+    def cleanup(self) -> None:
+        with self._lock:
+            dirs, self._dirs = self._dirs, []
+        for d in dirs:
+            shutil.rmtree(d, ignore_errors=True)
+
+    @staticmethod
+    def cleanup_stale(max_age: float = ATTACH_MAX_AGE, now: float | None = None) -> int:
+        """Eigene Reste (belegsuche-anhang-*, eigener Benutzer, kein Symlink) älter als max_age entfernen."""
+        base = tempfile.gettempdir()
+        now = time.time() if now is None else now
+        removed = 0
+        try:
+            entries = list(os.scandir(base))
+        except OSError:
+            return 0
+        for e in entries:
+            if not e.name.startswith(ATTACH_PREFIX):
+                continue
+            try:
+                st = e.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or now - st.st_mtime < max_age:
+                continue
+            shutil.rmtree(e.path, ignore_errors=True)
+            removed += not os.path.lexists(e.path)
+        return removed
+
+
+class PartError(Exception):
+    def __init__(self, status: int, msg: str):
+        super().__init__(msg)
+        self.status, self.msg = status, msg
+
+
+def _part_type(data: bytes, part_kind: str) -> str | None:
+    """Art eines Anhangs an den ersten Bytes (Schlüssel in PART_EXT) oder None (wird nicht geöffnet)."""
+    from .extract import sniff
+    magic = sniff(data)
+    if magic in PART_EXT:
+        return magic
+    if magic == "zip":
+        from .word import word_zip_kind
+        return word_zip_kind(data)
+    if magic == "ole":
+        from .word import is_word_ole
+        return "doc" if is_word_ole(data) else None
+    if magic is None and part_kind == "text":
+        return "txt"                          # auch HTML-Anhänge: als reiner Text, nie als Seite
+    return None
+
+
+def _read_part(db_path: Path, file_id: int, part_no: int) -> tuple[bytes, str, str, list[str]]:
+    """Anhang part_no der Mail file_id aus der Mail neu lesen (nur lesend) und gegen parts.sha256 prüfen.
+    Rückgabe: (Inhalt, Art nach den ersten Bytes, bereinigter Dateiname, Pfade der eingelesenen Ordner)."""
+    from .mail import MAX_MAIL_BYTES, find_part
+    path, err = _resolve(db_path, file_id)
+    if err:
+        raise PartError(404, err)
+    con = dbm.connect(db_path, readonly=True)
+    try:
+        kind = con.execute("SELECT kind FROM files WHERE id = ?", (file_id,)).fetchone()
+        if kind is None or kind[0] != "mail":
+            raise PartError(400, "Kein Anhang: die Datei ist keine E-Mail")
+        row = None
+        if dbm.has_table(con, "parts"):
+            row = con.execute("SELECT kind, name, sha256, mime_path FROM parts WHERE file_id = ? AND part_no = ?",
+                              (file_id, part_no)).fetchone()
+        roots = [r[0] for r in con.execute("SELECT path FROM roots")]
+    finally:
+        con.close()
+    if row is None:
+        raise PartError(404, "Anhang nicht gefunden – neu einlesen")
+    if row["kind"] not in OPENABLE_PARTS:
+        raise PartError(415, "Anhänge dieser Art werden nicht geöffnet")
+    try:
+        fd = os.open(path, OPEN_FLAGS)
+    except OSError:
+        raise PartError(404, "Datei nicht lesbar (verschoben oder ersetzt?) – neu einlesen") from None
+    with os.fdopen(fd, "rb") as f:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise PartError(404, "Keine normale Datei")
+        if st.st_size > MAX_MAIL_BYTES:
+            raise PartError(413, "Mail zu groß zum Öffnen eines Anhangs – Mail öffnen")
+        raw = f.read(MAX_MAIL_BYTES + 1)
+    data = find_part(raw, row["mime_path"] or "")
+    del raw
+    if data is None or not row["sha256"] or hashlib.sha256(data).hexdigest() != row["sha256"]:
+        raise PartError(409, MAIL_CHANGED)
+    kind = _part_type(data, row["kind"])
+    if kind is None:
+        raise PartError(415, "Anhänge dieser Art werden nicht geöffnet")
+    return data, kind, safe_filename(row["name"], PART_EXT[kind]), roots
+
+
+def make_handler(searcher: Searcher, port: int, attachments: AttachmentTemp | None = None):
     allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
     allowed_origins = {f"http://{h}" for h in allowed_hosts}
 
@@ -176,7 +396,9 @@ def make_handler(searcher: Searcher, port: int):
                         "page": h.page_no, "pages": h.pages, "score": h.score, "snippet": h.snippet_html,
                         "matched": h.matched, "missing": h.missing, "ocr": h.ocr, "available": h.available,
                         "duplicates": h.duplicates, "pdf": h.filename.lower().endswith(".pdf"),
-                        "outdated": h.outdated,
+                        "outdated": h.outdated, "kind": h.kind, "part_no": h.part_no, "part_name": h.part_name,
+                        "part_kind": h.part_kind, "part_page": h.part_page, "part_pages": h.part_pages,
+                        "mail_subject": h.mail_subject, "mail_from": h.mail_from, "mail_date": h.mail_date,
                     } for h in resp.hits]})
             elif url.path == "/api/status":
                 con = dbm.connect(searcher.db_path, readonly=True)
@@ -193,10 +415,13 @@ def make_handler(searcher: Searcher, port: int):
                     con.close()
                 self._json({"roots": roots, "files": done})
             elif url.path.startswith("/datei/"):
-                s = url.path[len("/datei/"):]
-                if not (s.isascii() and s.isdigit() and len(s) <= 18 and int(s) >= 1):
+                m = re.fullmatch(r"([0-9]{1,18})(?:/teil/([0-9]{1,5}))?", url.path[len("/datei/"):])
+                if not m or int(m.group(1)) < 1 or (m.group(2) is not None and not _valid_part(int(m.group(2)))):
                     return self._json({"error": "bad id"}, 400)
-                path, err = _resolve(searcher.db_path, int(s))
+                if m.group(2) is not None:
+                    return self._send_part(int(m.group(1)), int(m.group(2)))
+                fid = int(m.group(1))
+                path, err = _resolve(searcher.db_path, fid)
                 if err:
                     return self._json({"error": err}, 404)
                 # geprüften Pfad ohne Symlinks öffnen und nur das so geöffnete Objekt ausliefern:
@@ -209,10 +434,15 @@ def make_handler(searcher: Searcher, port: int):
                     st = os.fstat(fd)
                     if not stat.S_ISREG(st.st_mode):
                         return self._json({"error": "Keine normale Datei"}, 404)
+                    ctype = mimetypes.guess_type(path)[0]
+                    inline = ctype in INLINE_FILE_TYPES and _file_kind(searcher.db_path, fid) not in DOWNLOAD_KINDS
+                    if not inline:                 # Mail, Word, Unbekanntes: nur als Download, nie als Seite
+                        self._csp = CSP_ATTACHMENT
                     self.send_response(200)
-                    self.send_header("Content-Type", mimetypes.guess_type(path)[0] or "application/octet-stream")
+                    self.send_header("Content-Type", ctype if inline else "application/octet-stream")
                     self.send_header("Content-Length", str(st.st_size))
-                    self.send_header("Content-Disposition", "inline")
+                    self.send_header("Content-Disposition", "inline" if inline else
+                                     _content_disposition("attachment", _clean_name(os.path.basename(path)) or "datei"))
                     self.end_headers()
                     left = st.st_size
                     while left > 0 and (chunk := f.read(min(1 << 16, left))):
@@ -220,6 +450,38 @@ def make_handler(searcher: Searcher, port: int):
                         left -= len(chunk)
             else:
                 self._json({"error": "not found"}, 404)
+
+        def _send_part(self, file_id: int, part_no: int):
+            """Anhang aus dem Speicher: PDF und gängige Bilder zur Ansicht, alles andere nur als Download."""
+            try:
+                data, kind, name, _ = _read_part(searcher.db_path, file_id, part_no)
+            except PartError as e:
+                return self._json({"error": e.msg}, e.status)
+            ctype = PART_INLINE.get(kind)
+            self._csp = CSP_DEFAULT if kind == "pdf" else CSP_IMAGE if ctype else CSP_ATTACHMENT
+            self.send_response(200)
+            self.send_header("Content-Type", ctype or "application/octet-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Disposition", _content_disposition("inline" if ctype else "attachment", name))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _open_part(self, file_id: int, part_no: int):
+            try:
+                data, _, name, roots = _read_part(searcher.db_path, file_id, part_no)
+            except PartError as e:
+                return self._json({"error": e.msg}, e.status)
+            try:
+                path = temp.write(name, data, roots)
+            except TempRefused:
+                return self._json({"error": "Temp-Ordner liegt in einem eingelesenen Ordner – Anhang nicht "
+                                            "geöffnet (TMPDIR prüfen)"}, 500)
+            except OSError as e:
+                return self._json({"error": f"Anhang konnte nicht bereitgestellt werden ({e.strerror or e})"}, 500)
+            code = _returncode(subprocess.run(["open", path], check=False))
+            if code:
+                return self._json({"error": f"Öffnen fehlgeschlagen (Programm meldet Fehler {code})"}, 500)
+            self._json({"ok": True})
 
         def _post(self, url):
             if self.headers.get("X-Belegsuche") != "1":
@@ -235,14 +497,25 @@ def make_handler(searcher: Searcher, port: int):
                 return self._json({"error": "bad request"}, 400)
             if not isinstance(data, dict) or not _valid_id(data.get("id")):
                 return self._json({"error": "bad request"}, 400)
+            part = data.get("part")
+            if part is not None and not _valid_part(part):
+                return self._json({"error": "bad request"}, 400)
+            reveal = data.get("reveal") is True
+            if part is not None and not reveal:
+                return self._open_part(data["id"], part)
             path, err = _resolve(searcher.db_path, data["id"])
             if err:
                 return self._json({"error": err}, 404)
-            reveal = data.get("reveal") is True
-            cmd = ["open", "-R", path] if reveal else ["open", path]
-            result = subprocess.run(cmd, check=False)
-            code = getattr(result, "returncode", 0)      # None/ohne returncode: als Erfolg werten
-            if isinstance(code, int) and code != 0:
+            if reveal:                                   # bei Mails und Anhängen: die .eml im Finder
+                code = _returncode(subprocess.run(["open", "-R", path], check=False))
+            elif _file_kind(searcher.db_path, data["id"]) == "mail":
+                # mit Apple Mail; geht das nicht (z. B. Mail fehlt), mit dem Standardprogramm für .eml
+                code = _returncode(subprocess.run(["open", "-b", MAIL_APP, path], check=False))
+                if code:
+                    code = _returncode(subprocess.run(["open", path], check=False))
+            else:
+                code = _returncode(subprocess.run(["open", path], check=False))
+            if code:
                 # z. B. kein Programm für diesen Dateityp oder Datei gesperrt
                 msg = (f"Im Finder zeigen fehlgeschlagen (Programm meldet Fehler {code})" if reveal else
                        f"Öffnen fehlgeschlagen (Programm meldet Fehler {code}) – "
@@ -250,7 +523,15 @@ def make_handler(searcher: Searcher, port: int):
                 return self._json({"error": msg}, 500)
             self._json({"ok": True})
 
+    temp = attachments if attachments is not None else AttachmentTemp()
+    Handler.temp = temp
     return Handler
+
+
+def _returncode(result) -> int:
+    """Rückgabewert eines Programmstarts; None/ohne returncode gilt als Erfolg (0)."""
+    code = getattr(result, "returncode", 0)
+    return code if isinstance(code, int) else 0
 
 
 def serve(db_path: Path, port: int = 8765, open_browser: bool = True) -> int:
@@ -266,9 +547,14 @@ def serve(db_path: Path, port: int = 8765, open_browser: bool = True) -> int:
                   f"– anderen Port mit --port wählen")
         return 1
     browser_timer = None
+    attachments = AttachmentTemp()
     try:
+        try:
+            AttachmentTemp.cleanup_stale()          # Anhang-Kopien früherer Läufe (älter als 24 h)
+        except OSError:
+            pass
         port = httpd.server_address[1]          # bei --port 0 vergibt das System den Port
-        httpd.RequestHandlerClass = make_handler(Searcher(db_path), port)
+        httpd.RequestHandlerClass = make_handler(Searcher(db_path), port, attachments)
         url = f"http://127.0.0.1:{port}/"
         print(f"Belegsuche läuft: {url}  (beenden mit Ctrl+C)")
         if open_browser:
@@ -282,4 +568,5 @@ def serve(db_path: Path, port: int = 8765, open_browser: bool = True) -> int:
         if browser_timer is not None:
             browser_timer.cancel()
         httpd.server_close()
+        attachments.cleanup()                   # geöffnete Anhänge (Temp-Kopien) wegräumen
     return 0

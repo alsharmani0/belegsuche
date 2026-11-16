@@ -151,16 +151,23 @@ def is_word_ole(data: bytes) -> bool:
     return "WordDocument".encode("utf-16-le") in data
 
 
-def is_word_zip(data: bytes) -> bool:
-    """ZIP-Datei mit Word-Inhalt (docx/dotx/dotm) oder OpenDocument-Text."""
+def word_zip_kind(data: bytes) -> str | None:
+    """Art einer ZIP-Datei mit Word-Inhalt: 'docx' (auch dotx/dotm) oder 'odt' (OpenDocument-Text), sonst None."""
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as z:
             names = z.namelist()
             if "word/document.xml" in names:
-                return True
-            return "mimetype" in names and _read_member(z, "mimetype").strip() == _ODT_MIME
+                return "docx"
+            if "mimetype" in names and _read_member(z, "mimetype").strip() == _ODT_MIME:
+                return "odt"
     except (zipfile.BadZipFile, ExtractError, KeyError, OSError, RuntimeError):
-        return False
+        return None
+    return None
+
+
+def is_word_zip(data: bytes) -> bool:
+    """ZIP-Datei mit Word-Inhalt (docx/dotx/dotm) oder OpenDocument-Text."""
+    return word_zip_kind(data) is not None
 
 
 def word_text(data: bytes, notes: list[str]) -> list[str]:

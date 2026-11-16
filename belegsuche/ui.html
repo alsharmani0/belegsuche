@@ -106,9 +106,15 @@
   .sheet .fold { fill:#e3e8f5 }
   .sheet b { position:absolute; left:4px; right:5px; bottom:6px; font:720 10px/1.5 -apple-system,BlinkMacSystemFont,sans-serif; text-align:center; color:#9a3739; background:#ffe8e6; border-radius:3px }
   .sheet.image b { color:#2a5593; background:#e4edff }
+  .sheet.mail b { color:#7a4b0d; background:#fdecd2 }
+  .sheet.word b { color:#4a3a9c; background:#ebe6ff }
   .top,.flags { display:flex; gap:6px; flex-wrap:wrap; align-items:center }
   .top { gap:5px 10px }
   .chip { font-size:11px; line-height:1.45; padding:1px 6px; color:var(--sub); border:1px solid var(--rule); border-radius:5px; white-space:nowrap }
+  .chip.part { white-space:normal; overflow-wrap:anywhere; color:var(--accent); border-color:color-mix(in srgb,var(--accent) 35%,transparent) }
+  .mail-line { display:flex; align-items:flex-start; gap:6px; margin-top:4px; color:var(--sub); font-size:13px; line-height:1.45; overflow-wrap:anywhere }
+  .mail-line .icon { width:14px; height:14px; margin-top:2px }
+  .mail-line strong { color:var(--ink); font-weight:600 }
   .path { display:flex; align-items:flex-start; gap:6px; margin-top:4px }
   .path .icon { width:14px; height:14px; margin-top:2px }
   .snip { margin-top:6px; color:var(--sub); line-height:1.5; font-size:14px; overflow-wrap:anywhere }
@@ -182,6 +188,8 @@
   <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h15m-6-6 6 6-6 6"/></symbol>
   <symbol id="i-folder" viewBox="0 0 24 24"><path d="M2.8 7V5.8c0-1.1.8-1.8 1.9-1.8h5l2.4 2.6h7.1c1.2 0 2 .9 2 2v9.7c0 1-.8 1.8-1.9 1.8H4.7c-1.1 0-1.9-.8-1.9-1.8V7Z"/><path d="M3.4 8h17"/></symbol>
   <symbol id="i-open" viewBox="0 0 24 24"><path d="M13 4h7v7m0-7-10 10"/><path d="M10 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5"/></symbol>
+  <symbol id="i-mail" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3.8 6.5 8.2 6.3 8.2-6.3"/></symbol>
+  <symbol id="i-clip" viewBox="0 0 24 24"><path d="m20.4 11.6-8.1 8.1a5 5 0 0 1-7.1-7.1l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8"/></symbol>
 </defs></svg>
 <header class="topbar"><div class="nav wrap">
   <div class="brand"><img src="/assets/marke.svg" alt="" width="35" height="35">Belegsuche</div>
@@ -248,11 +256,12 @@ async function status() {
   }
 }
 
-async function openFile(id, reveal, btn) {
+async function openFile(id, reveal, btn, part) {
   let msg = '';
   try {
+    const body = part ? {id, reveal, part} : {id, reveal};      // part: Nummer des Mail-Anhangs
     const r = await fetch('/api/open', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Belegsuche': '1'},
-                                        body: JSON.stringify({id, reveal})});
+                                        body: JSON.stringify(body)});
     const j = await r.json().catch(() => ({}));
     if (!r.ok || j.error) msg = j.error || `Öffnen fehlgeschlagen (Fehler ${r.status})`;
   } catch (e) { msg = `Öffnen fehlgeschlagen – ${OFFLINE}`; }
@@ -261,24 +270,60 @@ async function openFile(id, reveal, btn) {
   if (msg) btn.parentElement.appendChild(span);
 }
 
+// Mail-Anhänge, die sich öffnen lassen (der Server prüft das noch einmal)
+const OPENABLE_PARTS = ['pdf', 'image', 'word', 'text'];
+
+function tile(h) {
+  if (h.kind === 'mail') return ['MAIL', 'mail'];
+  if (h.kind === 'word') return ['DOC', 'word'];
+  if (h.pdf) return ['PDF', ''];
+  return [String(h.filename).split('.').pop().slice(0, 4).toUpperCase(), 'image'];
+}
+
+// „Anhang 2 · Rechnung.pdf · Seite 3 von 5“ – nur, wenn die Fundstelle in einem Anhang liegt
+// (lange Namen gekürzt; der volle Name steht im Tooltip)
+function partLabel(h, full) {
+  if (h.kind !== 'mail' || !(h.part_no > 0)) return '';
+  let name = String(h.part_name || (h.part_kind === 'mail' ? 'Weitergeleitete Mail' : 'ohne Namen'));
+  const cs = Array.from(name);                                   // nach Zeichen, nicht UTF-16-Einheiten
+  if (!full && cs.length > 48) name = cs.slice(0, 30).join('') + '…' + cs.slice(-14).join('');
+  return `Anhang ${Number(h.part_no)} · ${name}` + (h.part_pages > 1 ? ` · Seite ${Number(h.part_page)} von ${Number(h.part_pages)}` : '');
+}
+
 function hitRow(h) {
-  const kind = h.pdf ? 'PDF' : String(h.filename).split('.').pop().slice(0, 4).toUpperCase();
-  const flags = [h.pages > 1 && `Seite ${h.page} von ${h.pages}`, h.ocr && 'Scan',
+  const [kind, tileClass] = tile(h);
+  const mail = h.kind === 'mail', id = Number(h.id), part = Number(h.part_no) || 0;
+  const flags = [!mail && h.pages > 1 && `Seite ${h.page} von ${h.pages}`,
+                 h.ocr && (!mail || ['pdf', 'image'].includes(h.part_kind)) && 'Scan',
                  h.outdated && 'Wird neu eingelesen', h.duplicates.length && `${h.duplicates.length + 1}× vorhanden`].filter(Boolean);
+  const label = partLabel(h);
   const path = [rootName(h.root), ...String(h.folder).split('/').filter(Boolean)].join(' / ');
   const disabled = h.available ? '' : 'disabled title="Datei nicht erreichbar"';
+  const mailLine = mail ? `<div class="mail-line">${icon('mail')}<span><strong>${esc(h.mail_subject || '(ohne Betreff)')}</strong>`
+    + [h.mail_from, h.mail_date].filter(Boolean).map(x => ` · ${esc(x)}`).join('') + '</span></div>' : '';
+  let actions;
+  if (mail) {
+    const canPart = part > 0 && OPENABLE_PARTS.includes(h.part_kind);
+    actions = `<button class="action" type="button" ${disabled} onclick="openFile(${id}, false, this)">${icon('mail')}Mail öffnen</button>
+      ${canPart ? `<button class="action" type="button" ${disabled} onclick="openFile(${id}, false, this, ${part})">${icon('clip')}Anhang öffnen</button>` : ''}
+      <button class="action" type="button" ${disabled} onclick="openFile(${id}, true, this)">${icon('folder')}Im Finder zeigen</button>
+      ${h.part_kind === 'pdf' && part > 0 && h.part_pages > 1 && h.available ? `<a class="page-link" href="/datei/${id}/teil/${part}#page=${Number(h.part_page)}" target="_blank" rel="noopener">Seite ${Number(h.part_page)} im Browser</a>` : ''}`;
+  } else {
+    actions = `<button class="action" type="button" ${disabled} onclick="openFile(${id}, false, this)">${icon('open')}Öffnen</button>
+      <button class="action" type="button" ${disabled} onclick="openFile(${id}, true, this)">${icon('folder')}Im Finder zeigen</button>
+      ${h.pdf && h.pages > 1 && h.available ? `<a class="page-link" href="/datei/${id}#page=${Number(h.page)}" target="_blank" rel="noopener">Seite ${Number(h.page)} im Browser</a>` : ''}`;
+  }
   return `<article class="hit">
-    <div class="doc-tile" aria-hidden="true"><span class="sheet ${h.pdf ? '' : 'image'}">
+    <div class="doc-tile" aria-hidden="true"><span class="sheet ${tileClass}">
       <svg viewBox="0 0 40 52"><path d="M6 1.5h18l14 14v31.8a3.4 3.4 0 0 1-3.4 3.4H6a4 4 0 0 1-4-4V5.5a4 4 0 0 1 4-4Z"/><path class="fold" d="M24 1.5v10.2c0 2.3 1.5 3.8 3.8 3.8H38Z"/></svg><b>${esc(kind)}</b></span></div>
     <div class="hit-body"><div class="top"><h3 class="name">${esc(h.filename)}</h3>
-      ${flags.length ? `<span class="flags">${flags.map(f => `<span class="chip">${esc(f)}</span>`).join('')}</span>` : ''}</div>
+      ${flags.length || label ? `<span class="flags">${label ? `<span class="chip part" title="${esc(partLabel(h, true))}">${esc(label)}</span>` : ''}${flags.map(f => `<span class="chip">${esc(f)}</span>`).join('')}</span>` : ''}</div>
+      ${mailLine}
       <div class="path" title="${esc(h.root)}/${esc(h.folder)}">${icon('folder')}<span>${esc(path)}</span></div>
       <div class="snip">${h.snippet}</div>
       ${h.missing.length ? `<div class="miss">Nicht enthalten: ${h.missing.map(esc).join(', ')}</div>` : ''}
       ${h.duplicates.length ? `<div class="dups">Auch unter: ${h.duplicates.map(esc).join(' · ')}</div>` : ''}</div>
-    <div class="actions"><button class="action" type="button" ${disabled} onclick="openFile(${h.id}, false, this)">${icon('open')}Öffnen</button>
-      <button class="action" type="button" ${disabled} onclick="openFile(${h.id}, true, this)">${icon('folder')}Im Finder zeigen</button>
-      ${h.pdf && h.pages > 1 && h.available ? `<a class="page-link" href="/datei/${h.id}#page=${h.page}" target="_blank" rel="noopener">Seite ${h.page} im Browser</a>` : ''}</div>
+    <div class="actions">${actions}</div>
     </article>`;
 }
 
