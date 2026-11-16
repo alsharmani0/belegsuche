@@ -31,7 +31,11 @@ Mit ⌘ K springt man ins Suchfeld, mit Esc zurück zur Ordnerübersicht.*
   einen eigenen Ordner im System-Temp (nie neben die Mail) und öffnet sie; „Seite 3 im Browser“ zeigt PDF-Anhänge
   direkt an der Fundstelle. Die Kopien werden beim Beenden von `belegsuche start` gelöscht, Reste älter als 24 h
   beim nächsten Start. Geöffnet werden nur PDF, Bilder, Word und Text, und nur wenn der Anhang noch derselbe ist
-  wie beim Einlesen (sonst: „Mail geändert – neu einlesen“).
+  wie beim Einlesen (sonst: „Mail geändert – neu einlesen“). Die Kopie ist wie ein Anhang aus Apple Mail als
+  „aus dem Internet geladen“ markiert (Word öffnet sie in der geschützten Ansicht). Bei DOMUS-Platzhaltern zeigt
+  der Treffer „In DOMUS abgelegt: …“ und öffnet die Datei aus dem Vorgangsordner.
+- **Word-Dateien** öffnen als schreibgeschützte Kopie im System-Temp: Word legt so keine Sperrdatei (`~$…`) neben
+  das Original und kann nicht ins Original speichern. „Im Finder zeigen“ zeigt das Original.
 
 ## Installation
 
@@ -208,13 +212,21 @@ dort nur die eingebauten.
 ## Unterstützte Dateien
 
 - PDF (mit Textebene oder gescannt), JPG, PNG, TIFF (mehrseitig), HEIC, BMP, GIF, WebP.
-- **Word**: `.docx`, `.dotx`, `.dotm` (direkt gelesen, mit Kopf- und Fußzeilen), `.doc`, `.dot`, `.rtf`, `.odt`
-  (über das macOS-Programm `textutil`, das die Datei nur über die Standardeingabe bekommt). Bilder in Word-Dateien
+- **Word**: `.docx`, `.dotx`, `.dotm` (direkt gelesen, mit Kopf- und Fußzeilen, auch Strict-OOXML), `.doc`,
+  `.dot`, `.rtf`, `.odt` (über das macOS-Programm `textutil`, das die Datei nur über die Standardeingabe bekommt;
+  Feldbefehle wie `MERGEFIELD` oder `SYMBOL` werden aus dem Text entfernt). Als `.doc` gespeichertes HTML,
+  Word-2003-XML oder reiner Text wird ebenfalls gelesen (HTML ohne Nachladen aus dem Netz). Bilder in Word-Dateien
   werden nicht per Texterkennung gelesen; hat eine Datei fast keinen Text, steht ein Hinweis im Bericht.
 - **E-Mails** (`.eml`): Seite 1 enthält Betreff, Von, An, Cc, Datum und den Mailtext (HTML-Mails als Text, ohne
   Nachladen von Bildern). Danach folgen die Seiten der Anhänge: PDF, Bilder (mit Texterkennung), Word, Text und
   angehängte Mails (bis Tiefe 2). Die Art eines Anhangs wird am Inhalt erkannt, nicht am Namen. Betreff und
   Absender zählen bei allen Seiten einer Mail mit, so findet „Absender + Betrag“ auch den Betrag im Anhang.
+  Die Namen der Anhänge stehen auf Seite 1, zählen bei der Suche aber nur so viel wie ein Dateiname: Wer nach
+  einem Dateinamen sucht, bekommt die Datei vor der Mail, die sie nur nennt.
+  - Fehlt der Date-Kopf (Entwürfe aus DOMUS), zeigt der Treffer die Änderungszeit der Datei als „(Dateidatum)“;
+    sie ist nicht als Datum durchsuchbar.
+  - Kopfzeilen mit rohen Umlauten in Latin-1/Windows-1252 (alte Programme) werden richtig gelesen, ebenso
+    Mailtexte, die als UTF-8 angegeben, aber in Windows-1252 geschrieben sind.
   - Kleine Bilder im Mailtext (Signatur-Logos), gleiche Bilder in derselben Mail und Signaturen (`smime.p7s`)
     werden übersprungen. Ein Anhang mit demselben Inhalt wie eine schon eingelesene Datei oder ein Anhang einer
     anderen Mail übernimmt deren Text – ohne neue Texterkennung.
@@ -225,6 +237,8 @@ dort nur die eingebauten.
     50 MB, passwortgeschützte PDFs. Höchstens 60 Anhänge und 1000 Seiten je Mail.
   - Hängt die Texterkennung eines Anhangs oder stürzt sie wiederholt ab, wird die Mail nur mit Mailtext (ohne
     PDF- und Bild-Anhänge) eingelesen und im Bericht markiert.
+  - Steckt derselbe Anhang in mehreren Mails, die gleichzeitig gelesen werden, wartet die zweite Mail, bis er
+    einmal erkannt ist, und übernimmt dann den Text.
 - Outlook-`.msg`, Excel und ZIP werden im Bericht als „nicht unterstützt“ gezählt. Der Bericht nennt außerdem
   die Zahl der eingelesenen E-Mails und Word-Dateien und wie viele Mail-Anhänge ausgewertet, übernommen,
   als Platzhalter erkannt oder nicht ausgewertet wurden.

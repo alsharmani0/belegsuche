@@ -3,6 +3,51 @@
 Bedienung und Messbefehle stehen in der [README](../README.md). Die früheren Messwerte sind unten
 getrennt aufgeführt: Die beiden alten Fragenlisten sind kein Blindtest für den aktuellen Code.
 
+## Nachbesserung nach der Prüfung von E-Mail und Word (16.11.2026)
+
+Zwei Prüfungen (Code/Sicherheit und Probelauf mit echten Daten) haben Befunde geliefert; behoben sind:
+
+- **Hänger nach Absturz (kritisch, schon vor E-Mail/Word):** Stürzte ein Arbeitsprozess ab, während der
+  Hauptprozess die nächste Datei einreihte, hing der Lauf für immer (der Pool beendete die übrigen Prozesse mit
+  SIGTERM, das sie ignorieren) oder brach mit `BrokenProcessPool` ab. Der Pool beendet seine Prozesse jetzt mit
+  SIGKILL; ein kaputter Pool beim Einreihen gilt als Absturz der laufenden Dateien.
+- **Doppelte Texterkennung:** Mails, deren Anhang gerade in einer anderen Mail oder als Datei erkannt wird, warten
+  darauf und übernehmen dann den Text (Probelauf: etwa 30 % der frisch erkannten Anhangseiten waren doppelt).
+- **Suche nach Dateinamen:** Die Zeilen „Anhänge: …“ und „Anhang in DOMUS abgelegt: …“ werden angezeigt, zählen
+  aber nicht als Mailtext; die Namen stehen abgewertet in der Pfadspalte (ausgewertete Anhänge auf ihren eigenen
+  Seiten). Liegt die Fundstelle im Mailtext und verweist die Mail auf eine Datei, die fast genauso gut passt
+  (Platzhalter oder gleicher Anhang), steht die Datei vorn und die Mail unter „auch unter: … (Mail mit Verweis)“.
+- **Öffnen:** Anhang-Kopien tragen `com.apple.quarantine` (Word: geschützte Ansicht). Word-Originale öffnen als
+  schreibgeschützte Kopie im System-Temp (keine `~$`-Sperrdatei im Domus-Ordner, kein Speichern ins Original).
+  DOMUS-Platzhalter werden im Treffer genannt und öffnen die verlinkte Datei. `belegsuche start` räumt die Kopien
+  auch beim Schließen des Terminals (SIGHUP/SIGTERM) weg; Temp-Dateien der Arbeitsprozesse liegen im Ordner des
+  Laufs und verschwinden mit ihm. Liegt TMPDIR in einem eingelesenen Ordner, wird nicht eingelesen.
+- **Mails:** Mails ohne Date-Kopf haben kein Ersatzdatum mehr im Suchtext und in `mails.sent_at`; der Treffer
+  zeigt „(Dateidatum)“. Rohe Latin-1-Kopfzeilen und falsch als UTF-8 deklarierte Texte werden richtig gelesen.
+  Fehlende MIME-Grenze: kein base64 im Suchtext. Tief verschachtelte Mails: nur der Kopf statt Fehler. Angehängte
+  Mails mit base64-Kodierung werden gelesen. Der Hinweis „verschlüsselt“ einer angehängten Mail steht an deren
+  Teil. Übernommene Seiten, die am Seitenlimit gekürzt werden, tragen einen Hinweis und werden nicht weiter
+  übernommen. Eine gleiche Mail an anderem Ort verweist nur auf Dateien neben sich.
+- **Typerkennung:** BMP und PDF-mit-Vorspann werden strenger erkannt („BMW …“ als Text ist kein Bild).
+- **Hauptprozess:** Der Vorabblick auf die Anhänge zerlegt Mails ohne die Kopfzeilen-Objekte von `policy.default`
+  (gleiche sha256 auf 1.500 echten Mails geprüft, präparierte Kopfzeilen 0,1 s statt 5 s); reine Textmails werden
+  gar nicht zerlegt.
+- **Word:** Strict-OOXML, als `.doc` gespeichertes HTML/Word-2003-XML/Text werden gelesen; Feldbefehle aus
+  `textutil` (`SYMBOL 215 \f "Symbol"`, `TIME \@ "…"`, `MERGEFIELD …`) werden entfernt.
+- **Anzeige und Bericht:** „Scan“ bei Mail-Treffern nur, wenn die Fundseite erkannt wurde; die Logzeile zählt
+  übernommene OCR-Seiten getrennt; doppelte Anhänge derselben Mail zählen im Bericht als „doppelt“.
+
+**Verifiziert:** 765 Tests grün, davon 48 neue in `tests/test_mail_review.py` (erfundene Daten; 43 davon
+schlagen auf dem Stand vor der Nachbesserung fehl). Probelauf mit echten Daten (ein Nummernbereich mit 2.540
+Dateien, davon 1.366 Mails, eigener Index, Domus nur gelesen): 132 s, 0 Fehler, 0 Abstürze, kein Original
+verändert; 2.689 statt 2.791 Seiten per Texterkennung, kein Anhanginhalt mehr doppelt erkannt; Suche nach dem
+Dateinamen eines Anhangs, der auch als Datei vorliegt: Datei auf Platz 1 in 28 von 34 Fällen (vorher 2 von 30),
+bei Platzhaltern in 54 von 60 (vorher 6 von 40); keine Word-Seite mehr mit Feldbefehlen.
+
+Offen (bewusst): Anhänge in `winmail.dat` (TNEF) bleiben nach der Vorgabe unausgewertet, obwohl dort oft PDFs
+stecken; ein eigener TNEF-Leser wäre der nächste Schritt. Lange URLs und wiederkehrende Signaturbilder bleiben im
+Index. Anhänge hinter einer falschen MIME-Grenze werden nicht gelesen (nur der Text bleibt, ohne base64).
+
 ## E-Mail und Word (16.11.2026)
 
 - **Lesen:** `.eml` mit Kopf, Mailtext (HTML über `html.parser`, kein Netzzugriff) und Anhängen; Word über
@@ -93,8 +138,9 @@ lehnen einen Index im Format 10 ab.
 ## Bekannte Grenzen
 
 - Excel, ZIP und Outlook-`.msg` werden nicht gelesen; der Bericht zählt sie als „nicht unterstützt“. In Mails
-  bleiben `winmail.dat` (Outlook/TNEF), Excel-, ZIP- und Video-Anhänge, Anhänge über 50 MB und
-  passwortgeschützte PDFs unausgewertet (Hinweis am Anhang). Verschlüsselte Mails (S/MIME): nur der Kopf.
+  bleiben `winmail.dat` (Outlook/TNEF – im Probelauf enthielten mehr als die Hälfte davon PDFs), Excel-, ZIP- und
+  Video-Anhänge, Anhänge über 50 MB und passwortgeschützte PDFs unausgewertet (Hinweis am Anhang). Verschlüsselte
+  Mails (S/MIME): nur der Kopf.
 - Bilder in Word-Dateien werden nicht per Texterkennung gelesen (eingescannte Belege in Word bleiben ohne Text,
   mit Hinweis). Seiten einer Word-Datei gibt es nur an harten Seitenumbrüchen; sonst ist sie eine Seite.
 - Zitierte Vorgänger-Mails bleiben im Mailtext und werden mit durchsucht.
