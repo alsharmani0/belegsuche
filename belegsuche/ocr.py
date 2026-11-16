@@ -93,6 +93,12 @@ def _join_lines(items: list[tuple[float, float, float, str, float]]) -> OcrResul
     return OcrResult("\n".join(out), total / weight if weight else 0.0)
 
 
+def native_strings(values) -> "NSArray":
+    """Python-Strings als echtes NSArray aus echten NSStrings – ohne Python-Objekte darin (siehe _run)."""
+    from Foundation import NSArray, NSString
+    return NSArray.arrayWithArray_([NSString.stringWithString_(v) for v in values])
+
+
 class AppleVisionOCR:
     name = "apple"
 
@@ -102,11 +108,15 @@ class AppleVisionOCR:
 
     def _run(self, handler) -> OcrResult:
         import Vision
+        from Foundation import NSArray
         req = Vision.VNRecognizeTextRequest.alloc().init()
         req.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
-        req.setRecognitionLanguages_(self.languages)
+        req.setRecognitionLanguages_(native_strings(self.languages))
         req.setUsesLanguageCorrection_(True)
-        ok, err = handler.performRequests_error_([req], None)
+        # Native NSArray statt Python-Liste: Vision gibt seine Arbeitsobjekte später auf einem eigenen
+        # Thread frei. Hält es dann noch eine Python-Liste und der Prozess beendet sich gerade, stürzt
+        # Python ab („Python wurde unerwartet beendet“ bei jedem Wechsel der Hilfsprozesse).
+        ok, err = handler.performRequests_error_(NSArray.arrayWithObject_(req), None)
         if not ok:
             raise RuntimeError(f"Vision-Fehler: {err}")
         items = []
