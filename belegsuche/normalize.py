@@ -51,6 +51,17 @@ MONTH_NUM_RE = re.compile(r"(?<![\d.,/])(\d{1,2})\s?[/.]\s?(\d{4})(?![\d.,/])")
 ID_SEP_RE = re.compile(r"(?<![\w/.-])([A-Za-z0-9]+(?:[-/._][A-Za-z0-9]+)+)(?![\w])")
 
 
+def decode_local_text(data: bytes) -> str:
+    """Kodierungen von Excel und lokalen Editoren für Suchfragen und eigene Synonyme."""
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return data.decode("utf-16", errors="replace")
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return max((data.decode(enc, errors="replace") for enc in ("cp1252", "mac_roman")),
+                   key=lambda t: sum(t.count(c) for c in "äöüÄÖÜß"))
+
+
 def fold(s: str) -> str:
     """Kleinschreibung, Umlaute ausschreiben (ä->ae, ß->ss), sonstige Akzente entfernen.
 

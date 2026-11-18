@@ -424,7 +424,7 @@ def test_cleanup_removes_copies(mailsrv):
     assert os.listdir(mailsrv["systmp"]) == []
 
 
-def test_stale_leftovers_older_than_a_day_are_removed(tmp_path, monkeypatch):
+def test_old_unmanaged_folders_are_preserved(tmp_path, monkeypatch):
     base = tmp_path / "systemtmp"
     base.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(base))
@@ -447,12 +447,12 @@ def test_stale_leftovers_older_than_a_day_are_removed(tmp_path, monkeypatch):
     link = base / "belegsuche-anhang-link"
     link.symlink_to(outside, target_is_directory=True)
     os.utime(link, (old, old), follow_symlinks=False)
-    assert srv.AttachmentTemp.cleanup_stale() == 1
-    assert not stale.exists() and fresh.exists() and foreign.exists()
+    assert srv.AttachmentTemp.cleanup_stale(roots=[]) == 0
+    assert stale.exists() and fresh.exists() and foreign.exists()
     assert link.is_symlink() and (outside / "wichtig.txt").read_text() == "bleibt"
 
 
-def test_serve_cleans_up_on_start_and_end(tmp_path, monkeypatch):
+def test_serve_keeps_unmanaged_old_folders_and_cleans_its_copies(tmp_path, monkeypatch):
     env = build(tmp_path)
     base = tmp_path / "systemtmp"
     base.mkdir()
@@ -480,13 +480,13 @@ def test_serve_cleans_up_on_start_and_end(tmp_path, monkeypatch):
     port = servers[0].server_address[1]
     fid = env["con"].execute("SELECT id FROM files WHERE relpath LIKE '%.eml'").fetchone()[0]
     st, _, _ = req(port, "POST", "/api/open", {"id": fid, "part": 1}, {"X-Belegsuche": "1"})
-    assert st == 200 and not stale.exists()
+    assert st == 200 and stale.exists()
     copy = calls[-1][1]
     assert os.path.isfile(copy)
     servers[0].shutdown()
     t.join(5)
     assert result == [0]
-    assert not os.path.exists(copy) and os.listdir(base) == []
+    assert not os.path.exists(copy) and os.listdir(base) == [stale.name]
 
 
 # --- Suche (JSON) und Oberfläche -----------------------------------------------------------------------

@@ -493,7 +493,7 @@ def test_migration_10_to_11_rereads_only_mails_with_winmail_without_new_ocr(tmp_
     monkeypatch.undo()
 
     con = dbm.connect(db)                          # Umstellung: die Mails gelten bis zum Einlesen als fertig
-    assert dbm.get_meta(con, "index_format") == "11"
+    assert dbm.get_meta(con, "index_format") == dbm.INDEX_FORMAT
     assert con.execute("SELECT count(*) FROM files WHERE status != 'done'").fetchone()[0] == 0
     hits = Searcher(db).search("Anbei Unterlagen").hits            # bisheriger Stand bleibt durchsuchbar
     mails = [h for h in hits if h.kind == "mail"]
@@ -551,7 +551,7 @@ def test_format_9_still_upgrades_and_old_program_rejects_format_11(tmp_path, mon
     con.commit()
     con.close()
     con = dbm.connect(db)
-    assert dbm.get_meta(con, "index_format") == "11" and dbm.mark_outdated_mails(con) == 0
+    assert dbm.get_meta(con, "index_format") == dbm.INDEX_FORMAT and dbm.mark_outdated_mails(con) == 0
     _, ps = run_index(con, [str(root)], engine=BytesEngine(), log=quiet)
     assert ps.done == 1 and parts_of(con, ids_of(con)["a.eml"])[1]["kind"] == "tnef"
     con.close()
@@ -815,7 +815,7 @@ def test_switch_alone_changes_nothing_visible_and_index_rereads_only_its_folders
     out = capsys.readouterr().out
     assert "a.eml" in out and "geändert" not in out
     con = dbm.connect(db)
-    assert dbm.get_meta(con, "index_format") == "11"
+    assert dbm.get_meta(con, "index_format") == dbm.INDEX_FORMAT
     assert con.execute("SELECT count(*) FROM files WHERE status != 'done'").fetchone()[0] == 0
     text = format_report(build_report(con))
     assert "noch offen:              0" in text

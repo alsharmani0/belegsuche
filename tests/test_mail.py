@@ -78,7 +78,7 @@ def test_format_9_is_upgraded_without_rebuilding_the_search_index(tmp_path, monk
 
     monkeypatch.setattr(dbm, "rebuild_search_index", no_rebuild)
     con = dbm.connect(db)
-    assert dbm.get_meta(con, "index_format") == dbm.INDEX_FORMAT == "11"
+    assert dbm.get_meta(con, "index_format") == dbm.INDEX_FORMAT
     assert dbm.has_table(con, "parts") and dbm.has_table(con, "mails")
     con.close()
     from belegsuche.search import Searcher
@@ -93,7 +93,7 @@ def test_older_format_still_rebuilds_and_newer_is_rejected(tmp_path, monkeypatch
     dbm.connect(db).close()
     assert calls == [1]
     con = dbm.connect(db)
-    dbm.set_meta(con, "index_format", "12")
+    dbm.set_meta(con, "index_format", str(int(dbm.INDEX_FORMAT) + 1))
     con.commit()
     con.close()
     with pytest.raises(dbm.IncompatibleIndexError, match="neuer"):

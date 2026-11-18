@@ -68,6 +68,41 @@ SAFE_NOTE = "nicht gelesen (nur Mailtext nach Zeitlimit oder Absturz)"
 SAFE_MAIL_NOTE = (f"{NOTE_PREFIX} nur Mailtext eingelesen – PDF- und Bild-Anhänge nach Zeitlimit oder Absturz "
                   "übersprungen")
 NOT_EVALUATED = "nicht ausgewertet"
+
+
+def legacy_retryable_part_note(note: str | None) -> bool:
+    """Nur eindeutig technische Alt-Fehler nachholen; Limits, unbekannte Formate und Passwortschutz bleiben aus."""
+    text = (note or "").casefold()
+    if any(s in text for s in ("passwort", "password", "beschädigt", "unbekanntes format", "nicht ausgewertet")):
+        return False
+    if re.match(r"nicht lesbar \((runtimeerror|timeouterror|oserror|permissionerror|connectionerror|blockingioerror)\)(;|$)",
+                text):
+        return True
+    return (text.startswith(("bild nicht lesbar (", "word-datei:", "word-datei nicht lesbar ("))
+            and any(s in text for s in ("vision-fehler", "tesseract", "vorübergehend", "temporarily", "timed out",
+                                       "zeitlimit", "textutil nicht verfügbar")))
+
+
+def retryable_part_error(error: BaseException) -> bool:
+    """Technische OCR-/Systemausfälle von dauerhaft unlesbaren Anhängen unterscheiden."""
+    import errno
+    import subprocess
+    if any(s in str(error).casefold() for s in ("passwort", "password", "beschädigt", "unbekanntes format")):
+        return False
+    seen = set()
+    current = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (RuntimeError, ConnectionError, subprocess.TimeoutExpired)):
+            return True
+        if isinstance(current, OSError) and current.errno in {
+                errno.EAGAIN, errno.EINTR, errno.EIO, errno.ENOMEM, errno.ENOSPC, errno.EMFILE, errno.ENFILE,
+                errno.EACCES, errno.EPERM, errno.ENOENT, errno.ETIMEDOUT}:
+            return True
+        current = current.__cause__
+    return legacy_retryable_part_note(str(error))
+
+
 # Zeilen im Kopf von Seite 1, die angezeigt, aber nicht als Mailtext durchsucht werden (index_body_text): Namen
 # der Anhänge (stehen abgewertet in der path-Spalte, sonst stünde die Mail bei der Suche nach einem Dateinamen vor
 # der Datei selbst) und das Ersatzdatum einer Mail ohne Date-Kopf
@@ -86,7 +121,8 @@ _SIGNATURE_TYPES = {"application/pkcs7-signature", "application/x-pkcs7-signatur
 _ENCRYPTED_TYPES = {"application/pkcs7-mime", "application/x-pkcs7-mime", "multipart/encrypted"}
 _TEXT_TYPES = {"text/plain", "text/csv", "text/html", "text/tab-separated-values"}
 _TEXT_EXT = (".txt", ".csv", ".tsv", ".htm", ".html")
-_WORD_EXT = (".doc", ".docx", ".dot", ".dotx", ".dotm", ".rtf", ".odt")
+_TEXT_WORD_EXT = (".doc", ".dot")
+_WORD_TYPES = {"application/msword", "application/vnd.ms-word"}
 _MAIL_HEAD_RE = re.compile(rb"^(?:[\w-]{2,40}:[^\r\n]*\r?\n){2,}", re.ASCII)
 _MAIL_HEADERS = (b"from:", b"to:", b"subject:", b"date:", b"received:", b"message-id:", b"mime-version:",
                  b"return-path:")
@@ -149,12 +185,44 @@ def _payload(part: Message) -> bytes:
     return data
 
 
+def _flowed_text(text: str, delsp: bool) -> str:
+    """RFC 3676: weiche Umbrüche nur innerhalb gleicher Zitiertiefe verbinden."""
+    lines = []
+    for line in text.split("\n"):
+        depth = len(line) - len(line.lstrip(">"))
+        content = line[depth:]
+        if content.startswith(" "):       # Space-Stuffing folgt auf die Zitatzeichen
+            content = content[1:]
+        signature = content == "-- "
+        flowed = content.endswith(" ") and not signature
+        lines.append((depth, content[:-1] if flowed and delsp else content, flowed, signature))
+    out, i = [], 0
+    while i < len(lines):
+        depth, content, flowed, _ = lines[i]
+        parts = [content]
+        i += 1
+        while flowed and i < len(lines) and lines[i][0] == depth and not lines[i][3]:
+            _, content, flowed, _ = lines[i]
+            parts.append(content)
+            i += 1
+        out.append((">" * depth + " " if depth else "") + "".join(parts))
+    return "\n".join(out)
+
+
 def part_text(part: Message) -> str:
     raw = _payload(part)
     text = _decode_bytes(raw, part.get_content_charset())
     if part.get_content_type() == "text/html":
         return html_to_text(text)
-    return text.replace("\r\n", "\n").replace("\r", "\n")
+    return _plain_text_lines(text, part)
+
+
+def _plain_text_lines(text: str, part: Message | None) -> str:
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if (part is not None and part.get_content_type() == "text/plain"
+            and str(part.get_param("format", "")).strip().lower() == "flowed"):
+        return _flowed_text(text, str(part.get_param("delsp", "")).strip().lower() == "yes")
+    return text
 
 
 class _HTMLText(HTMLParser):
@@ -501,6 +569,7 @@ class _Att:
     link: str | None = None           # DOMUS-Platzhalter: genannter Dateiname
     _sha: str | None = None
     charset: str | None = None        # Zeichensatz laut Mail (Textanhänge)
+    filename: str | None = None       # tatsächlicher Dateiname, wenn name ein freies TNEF-Anzeigelabel ist
     hint: str | None = None           # zusätzlicher Hinweis am Teil (z. B. Daten abgeschnitten)
     embedded: bool = False            # eingebettete Outlook-Nachricht (data ist ein TNEF-Strom)
     tdepth: int = 1                   # bei kind 'tnef' und eingebetteten Nachrichten: Ebene des TNEF-Stroms
@@ -585,7 +654,7 @@ def _classify(lf: _Leaf, depth: int) -> _Att:
 def _classify_content(att: _Att, depth: int) -> _Att:
     """Art eines Anhangs an seinen ersten Bytes (gilt für Mail-Anhänge und Anhänge in einer winmail.dat)."""
     data, mime, inline = att.data, att.mime, att.inline
-    low = att.name.lower()
+    low = (att.filename or att.name).lower()
     if not data:
         att.note = "leer (0 Byte)"
         return att
@@ -629,6 +698,19 @@ def _classify_content(att: _Att, depth: int) -> _Att:
     elif low.endswith(".eml") or (mime in ("application/octet-stream", "text/plain") and _looks_like_mail(data)
                                   and not low.endswith(_TEXT_EXT)):
         att.kind = "mail"
+    elif low.endswith(_TEXT_WORD_EXT) or mime in _WORD_TYPES:
+        # Textbasierte .doc/.dot erst nach Signatur- und Mailprüfung zulassen.
+        # Wie Textanlagen begrenzen, bevor Erkennung oder XML-Lesen beginnt.
+        if len(data) > MAX_ATTACHMENT_BYTES:
+            att.note = f"{NOT_EVALUATED} (zu groß: {len(data) / (1024 * 1024):.0f} MB)"
+        elif len(data) > MAX_TEXT_ATTACHMENT_BYTES:
+            att.note = f"{NOT_EVALUATED} (Textdatei zu groß)"
+        else:
+            from .word import text_word_kind
+            if text_word_kind(data) is not None:
+                att.kind = "word"
+            else:
+                att.note = f"{NOT_EVALUATED} (kein lesbarer Word-Inhalt)"
     elif mime in _TEXT_TYPES or low.endswith(_TEXT_EXT):
         att.kind = "text"
     else:
@@ -670,8 +752,13 @@ def _tnef_child(parent: _Att, ta: tnef.Attachment, k: int, depth: int) -> _Att:
     """Anhang k einer winmail.dat (bzw. eingebetteten Outlook-Nachricht) als _Att, an den ersten Bytes erkannt wie
     ein Mail-Anhang. Inline (Content-ID, Kennzeichen „MHTML“, versteckt) wie ein Bild im Mailtext."""
     name = _plain_name(ta.name)
+    file_name = _plain_name(ta.file_name) or name
     mime = (clean(ta.mime).lower()[:MAX_NAME_CHARS] if ta.mime else "") or "application/octet-stream"
-    a = _Att(None, f"{parent.path}!{k}", name, mime, ta.inline, ta.data or b"", "skipped", tdepth=parent.tdepth + 1)
+    if mime == "application/octet-stream":
+        mime = {".txt": "text/plain", ".csv": "text/csv", ".tsv": "text/tab-separated-values",
+                ".htm": "text/html", ".html": "text/html"}.get(os.path.splitext(file_name)[1].lower(), mime)
+    a = _Att(None, f"{parent.path}!{k}", name, mime, ta.inline, ta.data or b"", "skipped", filename=file_name,
+             tdepth=parent.tdepth + 1)
     if ta.truncated:
         a.hint = "unvollständig (winmail.dat abgeschnitten)"
     if ta.embedded:
@@ -689,7 +776,7 @@ def _tnef_child(parent: _Att, ta: tnef.Attachment, k: int, depth: int) -> _Att:
         by_ref = ta.method not in (None, tnef.ATTACH_BY_VALUE, tnef.ATTACH_EMBEDDED_MSG, tnef.ATTACH_OLE)
         a.note = f"{NOT_EVALUATED} (Verweis auf eine Datei, ohne Inhalt)" if by_ref else "leer (0 Byte)"
         return a
-    if mime in _SIGNATURE_TYPES or name.lower() in ("smime.p7s", "signature.asc"):
+    if mime in _SIGNATURE_TYPES or file_name.lower() in ("smime.p7s", "signature.asc"):
         a.kind = "ignore"
         return a
     _classify_content(a, depth)
@@ -1072,6 +1159,7 @@ def _read_attachment(att: _Att, ctx: _Ctx, depth: int, prefix: str, folder: _Fol
         return
     known = ctx.known.get(sha) if att.kind in REUSABLE_KINDS else None
     note = None
+    retryable = False
     pages: list[PageText] = []
     if known:
         pages = known[:room]
@@ -1100,21 +1188,26 @@ def _read_attachment(att: _Att, ctx: _Ctx, depth: int, prefix: str, folder: _Fol
                     pages = pages[:room]
             else:   # text
                 t = _decode_bytes(att.data, att.charset)
-                if att.mime == "text/html" or att.name.lower().endswith((".htm", ".html")):
+                if att.mime == "text/html" or (att.filename or att.name).lower().endswith((".htm", ".html")):
                     t = html_to_text(t)
-                pages = [PageText(1, t.replace("\r\n", "\n").replace("\r", "\n").strip(), "text")]
+                else:
+                    t = _plain_text_lines(t, att.part)
+                pages = [PageText(1, t.strip(), "text")]
         except ExtractError as e:
             note = str(e)
+            retryable = retryable_part_error(e)
             pages = []
         except MemoryError:
             raise
         except Exception as e:      # z. B. Pillow DecompressionBombError: nur dieser Anhang fehlt
             note = f"nicht lesbar ({type(e).__name__})"
+            retryable = retryable_part_error(e)
             pages = []
         if sub:
             extra = "; ".join(n[len(NOTE_PREFIX):].strip() if n.startswith(NOTE_PREFIX) else n for n in sub)
             note = f"{note}; {extra}" if note else extra
     info = ctx.add_part(att, att.kind, pages, note, prefix)
+    info.retryable = retryable
     ctx.seen[sha] = info.part_no
 
 

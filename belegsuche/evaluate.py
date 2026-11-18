@@ -6,6 +6,8 @@ Testdatei (CSV, Semikolon oder Komma):
 `datei` ist der Pfad relativ zum eingelesenen Ordner, „<Ordnername>/<relativer Pfad>“ oder der
 vollständige Pfad (Groß/Klein egal). Liegt derselbe relative Pfad in mehreren eingelesenen Ordnern,
 muss der Ordnername oder der vollständige Pfad dabeistehen.
+`seite` bleibt die Gesamtseite der Datei. Bei Mails können `teil` (0 = Mailtext) und
+`teilseite` (Seite innerhalb dieses Teils, ab 1) die erwartete Fundstelle genauer bestimmen.
 """
 from __future__ import annotations
 
@@ -13,19 +15,21 @@ import csv
 import json
 import os
 import unicodedata
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .search import Searcher, _group_score
+from .normalize import decode_local_text
+from .search import HitLocation, Searcher, _group_score
 
 EVAL_LIMIT = 50
 
 
 def _norm(p: str) -> str:
-    return unicodedata.normalize("NFC", p).replace("\\", "/").strip("/").casefold()
+    return unicodedata.normalize("NFC", p).replace("\\", "/").rstrip("/").casefold()
 
 
-def _page_number(value, context: str) -> int | None:
+def _page_number(value, context: str, name: str = "seite", minimum: int = 1) -> int | None:
     """Optionale Seitenzahl prüfen; Fehler dürfen die Seitenprüfung nicht still abschalten."""
     if value is None:
         return None
@@ -40,25 +44,25 @@ def _page_number(value, context: str) -> int | None:
             except ValueError:
                 pass
             else:
-                if number > 0:
+                if number >= minimum:
                     return number
-    elif type(value) is int and value > 0:
+    elif type(value) is int and value >= minimum:
         return value
-    raise ValueError(f"{context}: seite muss eine positive ganze Zahl ab 1 sein oder leer bleiben")
+    requirement = "eine positive ganze Zahl ab 1" if minimum == 1 else f"eine ganze Zahl ab {minimum}"
+    raise ValueError(f"{context}: {name} muss {requirement} sein oder leer bleiben")
+
+
+def _target_parts(query: dict, context: str) -> tuple[int | None, int | None]:
+    part = _page_number(query.get("teil"), context, "teil", 0)
+    page = _page_number(query.get("teilseite"), context, "teilseite")
+    if page is not None and part is None:
+        raise ValueError(f"{context}: teilseite braucht eine Teilnummer in teil")
+    return part, page
 
 
 def load_queries(path: Path) -> list[dict]:
     """Suchfragen aus der CSV. FileNotFoundError geht an den Aufrufer, unbrauchbarer Inhalt wird ValueError."""
-    data = path.read_bytes()
-    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):          # Excel „Unicode-Text“
-        raw = data.decode("utf-16", errors="replace")
-    else:
-        try:
-            raw = data.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            # Excel/Windows (cp1252) oder ältere Mac-Programme (MacRoman): die Kodierung mit mehr Umlauten gewinnt
-            raw = max((data.decode(enc, errors="replace") for enc in ("cp1252", "mac_roman")),
-                      key=lambda t: sum(t.count(c) for c in "äöüÄÖÜß"))
+    raw = decode_local_text(path.read_bytes())
     lines = raw.splitlines(keepends=True)
     skipped_lines = 0
     while skipped_lines < len(lines) and not lines[skipped_lines].strip():
@@ -73,7 +77,9 @@ def load_queries(path: Path) -> list[dict]:
         fmt = {"delimiter": ";"}
     rows = []
     try:
-        reader = csv.DictReader(lines, **fmt)
+        # Eine gewöhnliche Kopfzeile verrät dem Sniffer nicht, wie "" in einem Feld
+        # kodiert wird. Tabellenprogramme verdoppeln es gemäß CSV-Konvention.
+        reader = csv.DictReader(lines, doublequote=True, strict=True, **fmt)
         header = [(k or "").strip() for k in reader.fieldnames or []]
         if not {"suche", "datei"} <= {h.lower() for h in header}:
             raise ValueError(expected + (", ".join(h for h in header if h) or "keine Spaltennamen"))
@@ -98,6 +104,7 @@ def load_queries(path: Path) -> list[dict]:
                 raise ValueError(f"{context}: Jede Suchfrage braucht suche und datei "
                                  f"(fehlt: {', '.join(missing)})")
             _page_number(r.get("seite"), context)
+            _target_parts(r, context)
             rows.append(r)
     except csv.Error as e:
         raise ValueError(f"{path.name} ist keine lesbare CSV-Datei: {e}") from None
@@ -114,22 +121,36 @@ class EvalRow:
     seite_erwartet: int | None
     seite_gefunden: int | None
     ursache: str
-    kategorie: str            # ok | Ranking | Wortwahl | OCR oder Wortwahl | OCR | Text/Format | Index
+    kategorie: str            # ok | Ranking | Wortwahl | OCR oder Wortwahl | OCR | Text/Format | Index | Fundstelle
     notiz: str = ""
+    teil_erwartet: int | None = None
+    teil_gefunden: int | None = None
+    teilseite_erwartet: int | None = None
+    teilseite_gefunden: int | None = None
+    ziel_erfuellt: bool = False     # innerhalb Top k und sämtliche angegebenen Seiten-/Teilbedingungen erfüllt
 
 
 def _full(r) -> str:
     return os.path.join(r["root"], r["relpath"])      # wie Hit.fullpath und Hit.duplicates
 
 
-def _file_index(con) -> dict[str, list]:
-    """Alle Dateien des Index, auffindbar über relativen Pfad, „Ordnername/relativer Pfad“ und vollen Pfad."""
+def _path_forms(r) -> tuple[str, str, str]:
+    name = os.path.basename(r["root"].rstrip("/"))
+    return r["relpath"], os.path.join(name, r["relpath"]), _full(r)
+
+
+def _file_index(con, targets: Iterable[str]) -> dict[str, list]:
+    """Nur angefragte Pfade speichern, einschließlich aller Kandidaten für mehrdeutige Namen."""
+    keys = {_norm(path) for path in targets}
+    names = {key.rsplit("/", 1)[-1] for key in keys}
     idx: dict[str, list] = {}
+    if not keys:
+        return idx
     for r in con.execute("SELECT f.id, f.relpath, f.status, f.error, f.text_chars, f.ocr_pages, r.path AS root"
                          " FROM files f JOIN roots r ON r.id = f.root_id"):
-        name = os.path.basename(r["root"].rstrip("/"))
-        for key in {_norm(r["relpath"]), _norm(os.path.join(name, r["relpath"])), _norm(_full(r))}:
-            idx.setdefault(key, []).append(r)
+        if _norm(r["relpath"]).rsplit("/", 1)[-1] in names:
+            for key in keys.intersection(_norm(path) for path in _path_forms(r)):
+                idx.setdefault(key, []).append(r)
     return idx
 
 
@@ -138,19 +159,26 @@ def _find(idx: dict[str, list], datei: str) -> tuple[list, tuple[str, str] | Non
     rows = idx.get(_norm(datei), [])
     if not rows:
         return [], ("Datei nicht im Index – Pfad prüfen oder Ordner nicht eingelesen", "Index")
-    if len({_norm(_full(r)) for r in rows}) > 1:
-        return [], ("Pfad mehrdeutig – bitte vollständigen Pfad angeben", "Index")
+    if len({_full(r) for r in rows}) > 1:
+        exact = [r for r in rows if datei in _path_forms(r)]
+        if len({_full(r) for r in exact}) != 1:
+            return [], ("Pfad mehrdeutig – bitte vollständigen Pfad angeben", "Index")
+        return exact, None
     return rows, None
 
 
-def _matches(hit, target: str) -> bool:
-    """Ist die erwartete Datei (target = normierter voller Pfad) der Treffer oder eine inhaltsgleiche Kopie?"""
-    return any(_norm(p) == target for p in [hit.fullpath, *hit.duplicates])
+def _target_location(hit, file_ids: set[int], part: int | None = None) -> HitLocation | None:
+    """Fundstelle der erwarteten Datei – niemals einen Dubletten-Anzeigetext als Pfad auswerten."""
+    locations = hit.locations or [HitLocation(hit.file_id, hit.fullpath, hit.page_no, hit.pages,
+                                             hit.part_no, hit.part_page, hit.part_pages)]
+    matching = [location for location in locations if location.file_id in file_ids]
+    return next((location for location in matching if part is None or location.part_no == part),
+                next(iter(matching), None))
 
 
 def diagnose(con, searcher: Searcher, query: str, target: str) -> tuple[str, str]:
     """Warum steht die Datei `target` (Angabe wie in der Spalte datei) nicht vorn? (Ursache, Kategorie)"""
-    rows, err = _find(_file_index(con), target)
+    rows, err = _find(_file_index(con, [target]), target)
     return err or _diagnose_file(con, searcher, query, rows)
 
 
@@ -188,26 +216,44 @@ def evaluate(searcher: Searcher, queries: list[dict], k: int = 5) -> tuple[list[
     results: list[EvalRow] = []
     con = searcher._connect()
     try:
-        idx = _file_index(con)
+        con.execute("BEGIN")
+        idx = _file_index(con, (q["datei"] for q in queries))
         for q in queries:
-            want_page = _page_number(q.get("seite"), f"Suchfrage {len(results) + 1}")
+            context = f"Suchfrage {len(results) + 1}"
+            want_page = _page_number(q.get("seite"), context)
+            want_part, want_part_page = _target_parts(q, context)
             rows, err = _find(idx, q["datei"])
             rank, page = None, None
+            part, part_page = None, None
             if rows:
-                target = _norm(_full(rows[0]))
-                for i, h in enumerate(searcher.search(q["suche"], limit=EVAL_LIMIT).hits, 1):
-                    if _matches(h, target):
-                        rank, page = i, h.page_no
+                file_ids = {row["id"] for row in rows}
+                for i, h in enumerate(searcher.search(q["suche"], limit=EVAL_LIMIT, snapshot=con).hits, 1):
+                    location = _target_location(h, file_ids, want_part)
+                    if location is not None:
+                        rank, page = i, location.page_no
+                        part, part_page = location.part_no, location.part_page
                         break
+            wrong_part = want_part is not None and part != want_part
+            wrong_part_page = want_part_page is not None and part_page != want_part_page
             if rank is not None and rank <= k:
                 cause, cat = "ok", "ok"
-                if want_page and page != want_page:
+                if wrong_part:
+                    found = f"Teil {part}" if part is not None else "kein Mailteil"
+                    cause, cat = f"gefunden, aber {found} statt Teil {want_part}", "Fundstelle"
+                elif wrong_part_page:
+                    cause, cat = f"gefunden, aber Teilseite {part_page} statt {want_part_page}", "Fundstelle"
+                elif want_page and page != want_page:
                     cause = f"gefunden, aber Seite {page} statt {want_page}"
             else:
                 cause, cat = err or _diagnose_file(con, searcher, q["suche"], rows)
                 if cat == "Ranking" and rank:
                     cause = f"Platz {rank}: {cause}"
-            results.append(EvalRow(q["suche"], q["datei"], rank, want_page, page, cause, cat, q.get("notiz", "")))
+            exact = rank is not None and rank <= k and not wrong_part and not wrong_part_page \
+                and (want_page is None or page == want_page)
+            results.append(EvalRow(q["suche"], q["datei"], rank, want_page, page, cause, cat, q.get("notiz", ""),
+                                   teil_erwartet=want_part, teil_gefunden=part,
+                                   teilseite_erwartet=want_part_page, teilseite_gefunden=part_page,
+                                   ziel_erfuellt=exact))
     finally:
         con.close()
     n = len(results) or 1
@@ -219,6 +265,11 @@ def evaluate(searcher: Searcher, queries: list[dict], k: int = 5) -> tuple[list[
         "nicht_gefunden": sum(1 for r in results if not r.rang),
         "mrr": round(sum(1 / r.rang for r in results if r.rang) / n, 3),
         "seite_falsch": sum(1 for r in results if r.rang and r.seite_erwartet and r.seite_gefunden != r.seite_erwartet),
+        "teil_falsch": sum(1 for r in results if r.rang and r.teil_erwartet is not None and
+                           r.teil_gefunden != r.teil_erwartet),
+        "teilseite_falsch": sum(1 for r in results if r.rang and r.teilseite_erwartet is not None and
+                               r.teilseite_gefunden != r.teilseite_erwartet),
+        f"ziel_top_{k}": sum(1 for r in results if r.ziel_erfuellt),
         "ursachen": {},
     }
     for r in results:
@@ -239,6 +290,12 @@ def format_eval(results: list[EvalRow], summary: dict, k: int = 5) -> str:
     ]
     if summary["seite_falsch"]:
         lines.append(f"Falsche Seite:  {summary['seite_falsch']}")
+    if any(r.teil_erwartet is not None for r in results):
+        lines.append(f"Ziel in Top {k}: {pct(summary[f'ziel_top_{k}'])}")
+        if summary["teil_falsch"]:
+            lines.append(f"Falscher Teil:  {summary['teil_falsch']}")
+        if summary["teilseite_falsch"]:
+            lines.append(f"Falsche Teilseite: {summary['teilseite_falsch']}")
     if summary["ursachen"]:
         lines.append("Ursachen:       " + ", ".join(f"{v}× {k_}" for k_, v in summary["ursachen"].items()))
     lines += ["", f"{'Platz':>5}  {'Suche':<38} Ergebnis"]

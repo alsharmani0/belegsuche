@@ -40,8 +40,8 @@ from pathlib import Path
 from statistics import NormalDist
 
 import pypdfium2 as pdfium
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps
-from reportlab.lib.pagesizes import A4, landscape
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
+from reportlab.lib.pagesizes import A4
 from reportlab.lib.pdfencrypt import StandardEncryption
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
@@ -1730,7 +1730,7 @@ def fake_xlsx() -> bytes:
     })
 
 
-def fake_docx() -> bytes:
+def malformed_docx() -> bytes:
     return zip_bytes({
         "[Content_Types].xml": b'<?xml version="1.0" encoding="UTF-8"?><Types/>',
         "word/document.xml": "<w:document><!-- Mietvertrag Entwurf --></w:document>".encode(),
@@ -1758,7 +1758,7 @@ def office_lockfile() -> bytes:
 # --------------------------------------------------------------------------------------
 
 # kind: digital_pdf | scan_pdf | photo_jpg | png | heic | tiff_multipage | sammel_pdf |
-#       garbage_textlayer_pdf | encrypted_pdf | corrupt_pdf | unsupported | duplicate_of
+#       garbage_textlayer_pdf | encrypted_pdf | corrupt_pdf | malformed_docx | unsupported | duplicate_of
 PLAN: list[dict] = [
     # ---- digitale PDFs
     dict(kind="digital_pdf", path="2018/Belege/Unbenannt.pdf", doc="lindqvist_2018"),
@@ -1848,11 +1848,11 @@ PLAN: list[dict] = [
     dict(kind="encrypted_pdf", path="Mails/Anhänge/Kostennote_2024-0133_verschlüsselt.pdf", doc="weissenfels_2024",
          password="Sommer2024!"),
     dict(kind="corrupt_pdf", path="Mails/Anhänge/INV-93307.pdf", doc="kranich_2024"),
-    # ---- nicht unterstützt / Junk
+    # ---- nicht unterstützt, beschädigter Word-Entwurf und Junk
     dict(kind="unsupported", path="Buchhaltung/Nebenkosten 2023.xlsx", maker="xlsx"),
     dict(kind="unsupported", path="Buchhaltung/~$Nebenkosten 2023.xlsx", maker="lock"),
     dict(kind="unsupported", path="Mails/Anhänge/AW Rechnung Heizung.msg", maker="msg"),
-    dict(kind="unsupported", path="Verschiedenes/Mietvertrag Entwurf.docx", maker="docx"),
+    dict(kind="malformed_docx", path="Verschiedenes/Mietvertrag Entwurf.docx"),
     dict(kind="unsupported", path="Mails/Anhänge/Rechnungen_2022.zip", maker="zip"),
     dict(kind="unsupported", path=".DS_Store", maker="dsstore"),
     dict(kind="unsupported", path="Buchhaltung/Eingang/Scans/Thumbs.db", maker="thumbs"),
@@ -2091,13 +2091,16 @@ def build() -> dict:
             entry["tags"].append("abgeschnitten_40_prozent")
             entry["facts"] = [dict(seite=1, quelle="defekt", **doc.facts())]
 
+        elif kind == "malformed_docx":
+            data = malformed_docx()
+            entry.update(pages=0, readable=False, expected_error="corrupt")
+
         elif kind == "unsupported":
             m = spec["maker"]
             data = {
                 "xlsx": fake_xlsx,
                 "lock": office_lockfile,
                 "msg": lambda: fake_ole(b"__substg1.0_0037001F AW: Rechnung Heizung"),
-                "docx": fake_docx,
                 "zip": lambda: zip_bytes({"Rechnungen_2022/Liesmich.txt":
                                           "Rechnungen 2022 – siehe Ordner Buchhaltung.\n".encode()}),
                 "dsstore": ds_store,
@@ -2276,6 +2279,7 @@ def write_readme(entries, dev_rows, hold_rows) -> None:
         ("Hauswart statt Hausmeister", paths(lambda e: "hauswart_statt_hausmeister" in e["tags"])),
         ("Verschlüsselt (Benutzerpasswort)", paths(lambda e: e["kind"] == "encrypted_pdf")),
         ("Defekt (auf 40 % abgeschnitten)", paths(lambda e: e["kind"] == "corrupt_pdf")),
+        ("Beschädigtes Word-Dokument ohne lesbaren Text", paths(lambda e: e["kind"] == "malformed_docx")),
         ("Nicht unterstützt / Junk", paths(lambda e: e["kind"] == "unsupported")),
         ("Dubletten (byte-identisch)", [f"{e['path']}  (= {e['duplicate_of']})" for e in entries
                                         if e["kind"] == "duplicate_of"]),
@@ -2330,7 +2334,8 @@ def write_readme(entries, dev_rows, hold_rows) -> None:
         "garbage_textlayer_pdf": "Scan + unsichtbare, falsche OCR-Textebene",
         "encrypted_pdf": "passwortgeschützt – soll im Fehlerbericht landen",
         "corrupt_pdf": "abgeschnittene PDF – soll im Fehlerbericht landen",
-        "unsupported": "xlsx/docx/msg/zip und Junk (.DS_Store, Thumbs.db, Office-Lockdatei)",
+        "malformed_docx": "Word-Entwurf mit ungültigem XML; je nach Konverter Lesefehler oder nur über den Dateinamen auffindbar",
+        "unsupported": "xlsx/msg/zip und Junk (.DS_Store, Thumbs.db, Office-Lockdatei)",
         "duplicate_of": "byte-identische Kopie einer anderen Datei",
     }
     for k in desc:
@@ -2345,7 +2350,7 @@ def write_readme(entries, dev_rows, hold_rows) -> None:
         "",
         "## manifest.json",
         "",
-        "In neu erzeugten Manifesten ist `korpus_root` relativ zur Manifestdatei (`korpus`).",
+        "`korpus_root` ist relativ zur Manifestdatei (`korpus`).",
         "Die Dokumentpfade sind relativ zu diesem Korpusordner.",
         "",
         "Ein Eintrag pro Datei: `path` (relativ zu `korpus/`), `kind`, `pages`, `tags`, `readable`,",

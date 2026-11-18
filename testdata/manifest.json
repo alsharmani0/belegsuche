@@ -1,8 +1,8 @@
 {
   "generator": "tools/make_testdata.py",
   "seed": 20260924,
-  "korpus_root": "testdata/korpus",
-  "hinweis": "Alle Daten fiktiv. Pfade relativ zu korpus_root.",
+  "korpus_root": "korpus",
+  "hinweis": "Alle Daten fiktiv. korpus_root relativ zur Manifestdatei; Dokumentpfade relativ zu korpus_root.",
   "anzahl_dateien": 64,
   "documents": [
     {
@@ -1936,11 +1936,11 @@
     },
     {
       "path": "Verschiedenes/Mietvertrag Entwurf.docx",
-      "kind": "unsupported",
+      "kind": "malformed_docx",
       "pages": 0,
       "tags": [],
       "readable": false,
-      "expected_error": "unsupported",
+      "expected_error": "corrupt",
       "duplicate_of": null,
       "facts": [],
       "params": null,

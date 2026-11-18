@@ -29,13 +29,15 @@ Mit ⌘ K springt man ins Suchfeld, mit Esc zurück zur Ordnerübersicht.*
   in einem Anhang liegt, den Anhang und die Seite darin („Anhang 2: Rechnung.pdf, Seite 3/5“). In der Oberfläche
   öffnet „Mail öffnen“ die `.eml` mit Apple Mail. „Anhang öffnen“ legt eine schreibgeschützte Kopie des Anhangs in
   einen eigenen Ordner im System-Temp (nie neben die Mail) und öffnet sie; „Seite 3 im Browser“ zeigt PDF-Anhänge
-  direkt an der Fundstelle. Die Kopien werden beim Beenden von `belegsuche start` gelöscht, Reste älter als 24 h
-  beim nächsten Start. Geöffnet werden nur PDF, Bilder, Word und Text, und nur wenn der Anhang noch derselbe ist
-  wie beim Einlesen (sonst: „Mail geändert – neu einlesen“). Die Kopie ist wie ein Anhang aus Apple Mail als
-  „aus dem Internet geladen“ markiert (Word öffnet sie in der geschützten Ansicht). Bei DOMUS-Platzhaltern zeigt
-  der Treffer „In DOMUS abgelegt: …“ und öffnet die Datei aus dem Vorgangsordner.
+  direkt an der Fundstelle. Nur unterstützte Anhänge, deren Inhalt noch zum Index passt, lassen sich öffnen.
+  Kann macOS die Kopie nicht als „aus dem Internet geladen“ markieren, öffnet Belegsuche sie nicht. Beim Beenden
+  werden eigene, unveränderte Kopien entfernt. Beim nächsten Start kommen dafür nur verwaiste Kopien über
+  24 Stunden mit Besitznachweis infrage. Aktive Sitzungen, unbekannte Altordner und Archivwurzeln bleiben erhalten.
+  Bei DOMUS-Platzhaltern öffnet „In DOMUS abgelegt“ den Beleg im Vorgangsordner. Kommt der Beleg später hinzu,
+  lässt sich der Verweis nach dem nächsten Einlesen dieses Ordners nutzen.
 - **Word-Dateien** öffnen als schreibgeschützte Kopie im System-Temp: Word legt so keine Sperrdatei (`~$…`) neben
-  das Original und kann nicht ins Original speichern. „Im Finder zeigen“ zeigt das Original.
+  das Original und kann nicht ins Original speichern. Eine vorhandene macOS-Quarantänemarkierung bleibt auf der
+  Kopie erhalten. „Im Finder zeigen“ zeigt das Original.
 
 ## Installation
 
@@ -75,7 +77,7 @@ python3 -m venv .venv && .venv/bin/pip install -e .
 .venv/bin/belegsuche index
 
 # Dateien mit Fehlern erneut versuchen (z. B. nachdem die SSD mitten im Lauf abgezogen wurde),
-# dazu Mails, die nach Zeitlimit oder Absturz nur mit dem Mailtext eingelesen wurden
+# auch Mails, denen wegen eines Zeitlimits oder vorübergehenden Lesefehlers Anhangstext fehlt
 .venv/bin/belegsuche index --fehler-wiederholen
 ```
 
@@ -177,9 +179,9 @@ abgeschlossen sein.
 Der Standard-Suchindex liegt außerhalb der `.venv` und bleibt dabei erhalten. Die Originaldateien werden
 durch diese Schritte nicht verändert. Wegen der editierbaren Installation verwenden `.venv/bin/belegsuche`
 und beide `.command`-Starter den aktuellen Projektcode.
-Ändert ein Update das Indexformat, baut der erste Aufruf den Suchindex einmalig neu auf, siehe
-[Benutzung](#benutzung). Ein `belegsuche bericht` genügt, um den vorhandenen Index umzustellen. Messwerte, bekannte Grenzen
-und offene Punkte: [docs/STAND.md](docs/STAND.md).
+Ein `belegsuche bericht` genügt, um die Datenbankstruktur umzustellen. Das eigentliche Nachlesen betroffener
+Anhänge aus den Originalen erfolgt erst mit `belegsuche index`, siehe [Unterstützte Dateien](#unterstützte-dateien).
+Messwerte, bekannte Grenzen und offene Punkte: [docs/STAND.md](docs/STAND.md).
 
 ## Suchqualität messen
 
@@ -192,6 +194,20 @@ suche;datei;seite;notiz
 Wartung Heizung Musterstraße;2021/Objekte/Scan_00487.pdf;1;Beschreibung
 RE-2021/00487;2021/Objekte/Scan_00487.pdf;1;Nummer
 ```
+
+Bei einer Mail zählt `seite` ab dem Mailtext über **alle** Anhänge hinweg. Um gezielt die zweite Seite eines
+PDF-Anhangs zu prüfen, können die optionalen Spalten `teil` und `teilseite` verwendet werden. `teil=0` steht für
+den Mailtext, die weiteren Teilnummern entsprechen der Anzeige. `teilseite` beginnt bei 1 und benötigt `teil`.
+
+```text
+suche;datei;teil;teilseite
+Materialprüfung;Beispiele/Unterlagen.eml;1;2
+```
+
+Ein Treffer unter „auch unter“ zählt mit den Seiten der erwarteten Datei. Die Dateiränge (Platz 1, Top 5 usw.)
+bleiben mit bisherigen Auswertungen vergleichbar. Im JSON zählt `ziel_top_5` beim Standardwert `--k 5` nur
+Fälle, bei denen zusätzlich alle vorgegebenen Fundstellenangaben stimmen. Alle Fragen eines Laufs verwenden
+denselben Indexstand, auch während ein anderer Prozess neue Belege einliest.
 
 ```bash
 .venv/bin/belegsuche test meine_suchen.csv
@@ -251,6 +267,12 @@ dort nur die eingebauten.
     einer `winmail.dat` zählen mit).
   - Hängt die Texterkennung eines Anhangs oder stürzt sie wiederholt ab, wird die Mail nur mit Mailtext (ohne
     PDF- und Bild-Anhänge) eingelesen und im Bericht markiert.
+  - Bei einzelnen vorübergehenden Anhangfehlern bleibt der Mailtext durchsuchbar. Der Bericht nennt die
+    betroffenen Teilnummern. `index --fehler-wiederholen` versucht diese Anhänge erneut; ein unvollständiger
+    Mailstand wird nicht an bytegleiche Mailkopien weitergegeben.
+  - Weiche Umbrüche in `text/plain; format=flowed` zerlegen Suchwörter und Rechnungsnummern nicht.
+    Als `.doc` angehängtes HTML, Word-2003-XML und Klartext werden ebenfalls durchsucht (Textvarianten bis
+    5 MiB). Beim Öffnen einer solchen Anlage erhält man den erkannten Inhalt als UTF-8-Textdatei.
   - Steckt derselbe Anhang in mehreren Mails, die gleichzeitig gelesen werden, wartet die zweite Mail, bis er
     einmal erkannt ist, und übernimmt dann den Text.
 - Outlook-`.msg`, Excel und ZIP werden im Bericht als „nicht unterstützt“ gezählt. Der Bericht nennt außerdem
@@ -259,12 +281,20 @@ dort nur die eingebauten.
   Logos bzw. ohne Anhänge, mit der Zahl der Anhänge darin und dem Grund, falls eine nicht lesbar war) – und wie
   viele noch nicht geöffnet sind, weil sie eine frühere Version eingelesen hat.
 
-Ein vorhandener Index wird beim ersten Start auf das neue Format umgestellt, ohne neue Texterkennung und ohne
-Neuaufbau des Suchindex. E-Mails und Word-Dateien, die frühere Versionen als „nicht unterstützt“ eingetragen haben,
-liest der nächste `belegsuche index` ein. Ebenso liest er Mails mit `winmail.dat` neu, deren Anhänge eine frühere
-Version nicht geöffnet hat (Format 11) – nur diese Mails, und nur in den Ordnern, die er einliest; schon erkannte
-Seiten werden dabei übernommen. Bis dahin gelten sie als fertig (nicht als „geändert“), ihr bisheriger Text bleibt
-durchsuchbar, und der Bericht nennt sie als „noch nicht geöffnet“.
+**Bestehender Index.** Die Umstellung von Format 9 bis 12 auf Format 13 erhält den Volltextindex.
+Beim nächsten `index` liest das Programm in den ausgewählten Ordnern ältere TNEF-Mails erneut.
+Dadurch werden auch UTF-16-Mailtexte und Texte hinter eingebetteten RTF-Bildern auffindbar.
+Für Indizes vor Format 12 prüft es zusätzlich frühere Fehlklassifikationen wie als PDF gespeicherte
+`.dat`-Container und übersprungene Word-Anhänge. Vollständig erkannte, wiederverwendbare PDF- und Bildseiten
+werden übernommen. Unerreichbare Originale werden erst bei einem späteren Lauf geprüft.
+
+Hat eine ältere Version zu wenige Seiten aus einer eigenständigen Datei in einen Mail-Anhang übernommen,
+kann `index` das korrigieren, solange der Index den Kürzungshinweis der Quelldatei noch enthält.
+Fehlt dieser Nachweis, lässt sich eine verdächtige Mail in einer separaten neuen Datenbank vollständig prüfen.
+
+Die Umstellung liest nicht pauschal alle Mailtexte und Word-Originale neu. Fehlt in einem bereits gespeicherten
+Mailtext etwa ein durch weichen Zeilenumbruch geteiltes Wort, lässt sich die neue Erkennung für den
+betroffenen Ordner mit einer **separaten, neuen** `--db` nutzen. Den bisherigen Index dafür nicht löschen.
 
 ## Entwicklung
 

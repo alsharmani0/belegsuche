@@ -11,7 +11,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from .normalize import words
+from .normalize import decode_local_text, words
 
 DEFAULT_GROUPS = [
     "hausmeister, hauswart, hausmeisterdienst, hausmeisterservice, objektbetreuung, hausmeisterdienstleistung, hausmeisterdienstleistungen, hausmeistertaetigkeit",
@@ -62,26 +62,13 @@ STOPWORDS = {
 }
 
 
-def _read_text(path: Path) -> str:
-    """Textdatei in UTF-8, UTF-16 (mit BOM), cp1252 oder MacRoman lesen (wie evaluate.load_queries)."""
-    data = path.read_bytes()
-    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):          # „Unicode-Text“ aus Excel/Editor
-        return data.decode("utf-16", errors="replace")
-    try:
-        return data.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        # Windows (cp1252) oder ältere Mac-Programme (MacRoman): die Kodierung mit mehr Umlauten gewinnt
-        return max((data.decode(enc, errors="replace") for enc in ("cp1252", "mac_roman")),
-                   key=lambda t: sum(t.count(c) for c in "äöüÄÖÜß"))
-
-
 def load_synonyms(extra_file: Path | None = None) -> dict[str, dict[str, float]]:
     """Wort -> {verwandtes Wort/Phrase: Gewicht}."""
     lines = [(line, SYN_WEIGHT) for line in DEFAULT_GROUPS] + [(line, WEAK_WEIGHT) for line in WEAK_GROUPS]
     extra = ""
     if extra_file and extra_file.exists():
         try:
-            extra = _read_text(extra_file)
+            extra = decode_local_text(extra_file.read_bytes())
         except OSError as e:                 # unlesbar: ohne eigene Synonyme weitersuchen statt abzubrechen
             print(f"Hinweis: {extra_file} konnte nicht gelesen werden ({e}) – eigene Synonyme werden ignoriert.",
                   file=sys.stderr)

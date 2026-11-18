@@ -14,13 +14,14 @@ neben das Original im eingelesenen Ordner und erlaubt Speichern ins Original. �
 from __future__ import annotations
 
 import errno
+import fcntl
 import hashlib
 import json
 import mimetypes
 import os
 import re
-import shutil
 import signal
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -72,6 +73,8 @@ OPENABLE_PARTS = ("pdf", "image", "word", "text")      # parts.kind, die sich ö
 MAX_PART_NO = 10_000
 ATTACH_PREFIX = "belegsuche-anhang-"
 ATTACH_MAX_AGE = 24 * 3600            # ältere Reste im Temp-Ordner räumt der nächste Start weg
+ATTACH_MANIFEST = ".belegsuche-kopie.json"
+ATTACH_FORMAT = "belegsuche-temp-copy-v1"
 MAX_NAME_CHARS = 100
 MAIL_APP = "com.apple.mail"
 MAIL_CHANGED = "Mail geändert – neu einlesen"
@@ -149,8 +152,13 @@ _inside = dbm.path_inside
 
 
 def set_quarantine(fd: int) -> bool:
-    """Datei als „aus dem Internet geladen“ markieren (com.apple.quarantine), wie es Apple Mail mit Anhängen tut:
-    Word öffnet sie dann in der geschützten Ansicht, Makros bleiben aus. False, wenn macOS das nicht erlaubt."""
+    """Eine neue macOS-Quarantäne-Markierung setzen; False, wenn sie nicht gesetzt werden konnte."""
+    value = f"0081;{int(time.time()):08x};Belegsuche;".encode("ascii")
+    return _set_quarantine_value(fd, value)
+
+
+def _set_quarantine_value(fd: int, value: bytes) -> bool:
+    """Quarantäne am geöffneten Dateideskriptor setzen, auch unverändert vom Original."""
     import ctypes
     try:
         libc = ctypes.CDLL(None, use_errno=True)
@@ -160,55 +168,196 @@ def set_quarantine(fd: int) -> bool:
     fsetxattr.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32,
                           ctypes.c_int]
     fsetxattr.restype = ctypes.c_int
-    value = f"0081;{int(time.time()):08x};Belegsuche;".encode("ascii")
     return fsetxattr(fd, QUARANTINE_ATTR, value, len(value), 0, 0) == 0
+
+
+def _get_quarantine(fd: int) -> bytes | None:
+    """Original-Markierung vom geöffneten FD lesen; nur ENOATTR/ENODATA bedeutet „keine vorhanden“."""
+    import ctypes
+    try:
+        get = ctypes.CDLL(None, use_errno=True).fgetxattr
+    except (OSError, AttributeError) as e:
+        raise OSError(errno.ENOTSUP, "Quarantäne-Markierung kann nicht gelesen werden") from e
+    get.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32,
+                   ctypes.c_int]
+    get.restype = ctypes.c_ssize_t
+    size = get(fd, QUARANTINE_ATTR, None, 0, 0, 0)
+    if size < 0:
+        code = ctypes.get_errno()
+        if code in (getattr(errno, "ENOATTR", None), getattr(errno, "ENODATA", None)):
+            return None
+        raise OSError(code, os.strerror(code))
+    if size == 0:
+        raise OSError(errno.EINVAL, "Quarantäne-Markierung ist leer")
+    if size > 65536:
+        raise OSError(errno.E2BIG, "Quarantäne-Markierung ist zu groß")
+    buffer = ctypes.create_string_buffer(size)
+    actual = get(fd, QUARANTINE_ATTR, buffer, len(buffer), 0, 0)
+    if actual < 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code))
+    if actual != size:
+        raise OSError(errno.EAGAIN, "Quarantäne-Markierung wurde während des Lesens geändert")
+    return buffer.raw[:actual]
 
 
 class TempRefused(Exception):
     """Temp-Ordner läge in einem eingelesenen Ordner – dann wird nichts geschrieben."""
 
 
+class QuarantineError(OSError):
+    """Eine erforderliche Sicherheitsmarkierung konnte nicht gesetzt werden."""
+
+
+def _archive_overlap(path: str, roots: list[str]) -> bool:
+    return any(_inside(path, root) or _inside(root, path) for root in roots)
+
+
+def _remove_copy(directory: str, manifest_fd: int, roots: list[str]) -> bool:
+    """Nur die im eigenen Manifest belegte unveränderte Kopie entfernen; nie unbekannte Inhalte rekursiv."""
+    if _archive_overlap(directory, roots):
+        return False
+    directory_fd = os.open(directory, OPEN_FLAGS | os.O_DIRECTORY)
+    try:
+        ds, ms = os.fstat(directory_fd), os.fstat(manifest_fd)
+        if not stat.S_ISDIR(ds.st_mode) or ds.st_uid != os.getuid() or stat.S_IMODE(ds.st_mode) != 0o700:
+            return False
+        marker = os.stat(ATTACH_MANIFEST, dir_fd=directory_fd, follow_symlinks=False)
+        if not stat.S_ISREG(ms.st_mode) or ms.st_uid != os.getuid() or stat.S_IMODE(ms.st_mode) != 0o600 \
+                or (marker.st_dev, marker.st_ino) != (ms.st_dev, ms.st_ino) or ms.st_size > 2048:
+            return False
+        os.lseek(manifest_fd, 0, os.SEEK_SET)
+        try:
+            record = json.loads(os.read(manifest_fd, 2049))
+        except (ValueError, RecursionError):
+            return False
+        if not isinstance(record, dict) or record.get("format") != ATTACH_FORMAT \
+                or record.get("directory") != os.path.basename(directory) \
+                or record.get("directory_identity") != [ds.st_dev, ds.st_ino]:
+            return False
+        name = record.get("name")
+        size = record.get("size")
+        if not isinstance(name, str) or not name or name != _clean_name(name) or name == ATTACH_MANIFEST \
+                or "/" in name or "\\" in name or type(size) is not int or not 0 <= size <= MAX_COPY_BYTES:
+            return False
+        if set(os.listdir(directory_fd)) != {ATTACH_MANIFEST, name}:
+            return False
+        fd = os.open(name, OPEN_FLAGS, dir_fd=directory_fd)
+        with os.fdopen(fd, "rb") as copy:
+            fs = os.fstat(fd)
+            if not stat.S_ISREG(fs.st_mode) or fs.st_uid != os.getuid() or fs.st_size != size \
+                    or stat.S_IMODE(fs.st_mode) != 0o400 \
+                    or record.get("file_identity") != [fs.st_dev, fs.st_ino]:
+                return False
+            digest = hashlib.file_digest(copy, "sha256").hexdigest()
+        if digest != record.get("sha256"):
+            return False
+        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        current_directory = os.stat(directory, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (fs.st_dev, fs.st_ino) \
+                or (current_directory.st_dev, current_directory.st_ino) != (ds.st_dev, ds.st_ino) \
+                or _archive_overlap(directory, roots):
+            return False
+        os.unlink(name, dir_fd=directory_fd)
+        os.unlink(ATTACH_MANIFEST, dir_fd=directory_fd)
+        current_directory = os.stat(directory, follow_symlinks=False)
+        if (current_directory.st_dev, current_directory.st_ino) == (ds.st_dev, ds.st_ino):
+            os.rmdir(directory)
+        return True
+    finally:
+        os.close(directory_fd)
+
+
 class AttachmentTemp:
     """Temp-Kopien geöffneter Anhänge: je Anhang ein eigener Ordner (0700) unter $TMPDIR, Datei 0400.
-    Aufgeräumt wird beim Ende des Servers; Reste älter als 24 h beim nächsten Start."""
+    Nur unveränderte eigene Kopien werden entfernt; belegte inaktive Reste auch beim nächsten Start."""
 
     def __init__(self):
-        self._dirs: list[str] = []
+        self._dirs: list[tuple[str, int, list[str]]] = []
         self._lock = threading.Lock()
+        self._closed = False
 
-    def write(self, name: str, data: bytes, roots: list[str], quarantine: bool = True) -> str:
-        """Kopie anlegen. quarantine: als heruntergeladen markieren (Mail-Anhänge, Inhalt von außen)."""
-        base = tempfile.gettempdir()
+    def write(self, name: str, data: bytes, roots: list[str], quarantine: bool | bytes = True) -> str:
+        """Kopie und Besitzmanifest anlegen. Gehaltener flock kennzeichnet die aktive Sitzung."""
+        if not name or name != _clean_name(name) or name == ATTACH_MANIFEST:
+            raise OSError(errno.EINVAL, "Ungültiger Dateiname für die Temp-Kopie")
+        base = os.path.realpath(tempfile.gettempdir())
         for r in roots:
             if _inside(base, r):
                 raise TempRefused(r)
-        d = tempfile.mkdtemp(prefix=ATTACH_PREFIX, dir=base)
         with self._lock:
-            self._dirs.append(d)
-        os.chmod(d, 0o700)
-        if any(_inside(d, r) for r in roots):
-            shutil.rmtree(d, ignore_errors=True)
-            raise TempRefused(d)
-        path = os.path.join(d, name)
-        fd = os.open(path, WRITE_FLAGS, 0o600)
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-            f.flush()
-            if quarantine:
-                set_quarantine(f.fileno())
-        os.chmod(path, 0o400)
-        return path
+            if self._closed:
+                raise OSError(errno.ECANCELED, "Suchoberfläche wird beendet")
+            d = tempfile.mkdtemp(prefix=ATTACH_PREFIX, dir=base)
+            marker_fd, identity = None, None
+            try:
+                os.chmod(d, 0o700)
+                if _archive_overlap(d, roots):
+                    raise TempRefused(d)
+                marker_fd = os.open(os.path.join(d, ATTACH_MANIFEST),
+                                    (WRITE_FLAGS & ~os.O_WRONLY) | os.O_RDWR, 0o600)
+                fcntl.flock(marker_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                path = os.path.join(d, name)
+                fd = os.open(path, WRITE_FLAGS, 0o600)
+                with os.fdopen(fd, "wb") as f:
+                    fs = os.fstat(fd)
+                    identity = fs.st_dev, fs.st_ino
+                    ds = os.stat(d, follow_symlinks=False)
+                    record = {"format": ATTACH_FORMAT, "directory": os.path.basename(d), "name": name,
+                              "directory_identity": [ds.st_dev, ds.st_ino],
+                              "file_identity": list(identity), "size": len(data),
+                              "sha256": hashlib.sha256(data).hexdigest()}
+                    with os.fdopen(os.dup(marker_fd), "wb") as marker:
+                        marker.write(json.dumps(record, ensure_ascii=True).encode("ascii"))
+                    f.write(data)
+                    f.flush()
+                    marked = (_set_quarantine_value(fd, quarantine) if isinstance(quarantine, bytes)
+                              else set_quarantine(fd) if quarantine else True)
+                    if not marked:
+                        raise QuarantineError(errno.EACCES, "Erforderliche Quarantäne-Markierung konnte nicht gesetzt werden")
+                    os.fchmod(fd, 0o400)
+                self._dirs.append((d, marker_fd, list(roots)))
+                return path
+            except BaseException:
+                # Nur genau die gerade von uns angelegte Datei entfernen, niemals fremde Inhalte rekursiv.
+                try:
+                    if identity is not None:
+                        current = os.stat(os.path.join(d, name), follow_symlinks=False)
+                        if (current.st_dev, current.st_ino) == identity:
+                            os.unlink(os.path.join(d, name))
+                    if marker_fd is not None:
+                        current = os.stat(os.path.join(d, ATTACH_MANIFEST), follow_symlinks=False)
+                        ms = os.fstat(marker_fd)
+                        if (current.st_dev, current.st_ino) == (ms.st_dev, ms.st_ino):
+                            os.unlink(os.path.join(d, ATTACH_MANIFEST))
+                    os.rmdir(d)
+                except OSError:
+                    pass
+                finally:
+                    if marker_fd is not None:
+                        os.close(marker_fd)
+                raise
 
-    def cleanup(self) -> None:
+    def cleanup(self, roots: list[str] | None = None, *, remove: bool = True) -> None:
         with self._lock:
             dirs, self._dirs = self._dirs, []
-        for d in dirs:
-            shutil.rmtree(d, ignore_errors=True)
+            self._closed = True
+        for directory, fd, saved_roots in dirs:
+            try:
+                if remove:
+                    _remove_copy(directory, fd, saved_roots + (roots or []))
+            except OSError:
+                pass
+            finally:
+                os.close(fd)
 
     @staticmethod
-    def cleanup_stale(max_age: float = ATTACH_MAX_AGE, now: float | None = None) -> int:
-        """Eigene Reste (belegsuche-anhang-*, eigener Benutzer, kein Symlink) älter als max_age entfernen."""
-        base = tempfile.gettempdir()
+    def cleanup_stale(max_age: float = ATTACH_MAX_AGE, now: float | None = None,
+                      *, roots: list[str] | None = None) -> int:
+        """Nur belegte, unveränderte Reste beendeter Sitzungen außerhalb sämtlicher Archivwurzeln entfernen."""
+        if roots is None:                       # Ohne aktuelle Wurzeln gibt es keinen Löschungsnachweis.
+            return 0
+        base = os.path.realpath(tempfile.gettempdir())
         now = time.time() if now is None else now
         removed = 0
         try:
@@ -222,10 +371,19 @@ class AttachmentTemp:
                 st = e.stat(follow_symlinks=False)
             except OSError:
                 continue
-            if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or now - st.st_mtime < max_age:
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or now - st.st_mtime < max_age \
+                    or _archive_overlap(e.path, roots):
                 continue
-            shutil.rmtree(e.path, ignore_errors=True)
-            removed += not os.path.lexists(e.path)
+            fd = None
+            try:
+                fd = os.open(os.path.join(e.path, ATTACH_MANIFEST), os.O_RDWR | OPEN_FLAGS)
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)   # aktive andere Sitzung niemals aufräumen
+                removed += _remove_copy(e.path, fd, roots)
+            except OSError:
+                pass
+            finally:
+                if fd is not None:
+                    os.close(fd)
         return removed
 
 
@@ -255,7 +413,7 @@ def _part_type(data: bytes, part_kind: str) -> str | None:
 def _read_part(db_path: Path, file_id: int, part_no: int) -> tuple[bytes, str, str, list[str]]:
     """Anhang part_no der Mail file_id aus der Mail neu lesen (nur lesend) und gegen parts.sha256 prüfen.
     Rückgabe: (Inhalt, Art nach den ersten Bytes, bereinigter Dateiname, Pfade der eingelesenen Ordner)."""
-    from .mail import MAX_MAIL_BYTES, find_part
+    from .mail import MAX_MAIL_BYTES, MAX_TEXT_ATTACHMENT_BYTES, find_part
     path, err = _resolve(db_path, file_id)
     if err:
         raise PartError(404, err)
@@ -291,6 +449,17 @@ def _read_part(db_path: Path, file_id: int, part_no: int) -> tuple[bytes, str, s
     if data is None or not row["sha256"] or hashlib.sha256(data).hexdigest() != row["sha256"]:
         raise PartError(409, MAIL_CHANGED)
     kind = _part_type(data, row["kind"])
+    if kind is None and row["kind"] == "word" and len(data) <= MAX_TEXT_ATTACHMENT_BYTES:
+        # HTML/WordML/Text unter der Endung .doc: keine aktive Datei an Word oder den
+        # Browser übergeben. Erst die Originalbytes prüfen (oben), dann nur den Text liefern.
+        from .extract import ExtractError, sniff
+        from .word import text_word_kind, word_text
+        if sniff(data) is None and text_word_kind(data) is not None:
+            try:
+                data = "\f".join(word_text(data, [])).encode("utf-8")
+            except (ExtractError, UnicodeError) as e:
+                raise PartError(415, "Text dieses Word-Anhangs ist nicht lesbar") from e
+            kind = "txt"
     if kind is None:
         raise PartError(415, "Anhänge dieser Art werden nicht geöffnet")
     return data, kind, safe_filename(row["name"], PART_EXT[kind]), roots
@@ -315,8 +484,8 @@ def _link_target(db_path: Path, file_id: int, part_no: int) -> int | None:
     return target
 
 
-def _read_original(path: str, limit: int) -> bytes:
-    """Inhalt eines Originals (ohne Symlinks, nur normale Datei, höchstens limit Bytes) – nur lesend."""
+def _read_original(path: str, limit: int) -> tuple[bytes, bytes | None]:
+    """Inhalt und bestehende Quarantäne desselben geöffneten Originals nur lesend übernehmen."""
     try:
         fd = os.open(path, OPEN_FLAGS)
     except OSError:
@@ -327,7 +496,15 @@ def _read_original(path: str, limit: int) -> bytes:
             raise PartError(404, "Keine normale Datei")
         if st.st_size > limit:
             raise PartError(413, "Datei zu groß für eine Kopie – im Finder zeigen und von Hand öffnen")
-        return f.read(limit + 1)
+        try:
+            quarantine = _get_quarantine(fd)
+        except OSError as e:
+            raise PartError(500, "Sicherheitsmarkierung des Originals konnte nicht gelesen werden "
+                            f"({e.strerror or e}) – Datei nicht geöffnet") from None
+        data = f.read(limit + 1)
+        if len(data) > limit:
+            raise PartError(413, "Datei zu groß für eine Kopie – im Finder zeigen und von Hand öffnen")
+        return data, quarantine
 
 
 def _roots(db_path: Path) -> list[str]:
@@ -457,6 +634,7 @@ def make_handler(searcher: Searcher, port: int, attachments: AttachmentTemp | No
             elif url.path == "/api/status":
                 con = dbm.connect(searcher.db_path, readonly=True)
                 try:
+                    con.execute("BEGIN")
                     roots = [{"path": r["path"], "online": os.path.isdir(r["path"])}
                              for r in con.execute("SELECT path FROM roots ORDER BY id")]
                     # Geänderte Dateien behalten bis zum erneuten Einlesen ihren Suchtext.
@@ -537,13 +715,16 @@ def make_handler(searcher: Searcher, port: int, attachments: AttachmentTemp | No
                 return self._json({"error": e.msg}, e.status)
             return self._open_copy(name, data, roots, quarantine=True)
 
-        def _open_copy(self, name: str, data: bytes, roots: list[str], quarantine: bool):
+        def _open_copy(self, name: str, data: bytes, roots: list[str], quarantine: bool | bytes):
             """Schreibgeschützte Kopie im System-Temp anlegen und mit dem Standardprogramm öffnen."""
             try:
                 path = temp.write(name, data, roots, quarantine=quarantine)
             except TempRefused:
                 return self._json({"error": "Temp-Ordner liegt in einem eingelesenen Ordner – Datei nicht "
                                             "geöffnet (TMPDIR prüfen)"}, 500)
+            except QuarantineError:
+                return self._json({"error": "Erforderliche Sicherheitsmarkierung konnte nicht gesetzt werden – "
+                                            "Datei nicht geöffnet"}, 500)
             except OSError as e:
                 return self._json({"error": f"Kopie konnte nicht bereitgestellt werden ({e.strerror or e})"}, 500)
             code = _returncode(subprocess.run(["open", path], check=False))
@@ -554,11 +735,11 @@ def make_handler(searcher: Searcher, port: int, attachments: AttachmentTemp | No
         def _open_word(self, path: str):
             """Word-Original als schreibgeschützte Kopie öffnen (keine Sperrdatei, kein Speichern ins Original)."""
             try:
-                data = _read_original(path, MAX_COPY_BYTES)
+                data, quarantine = _read_original(path, MAX_COPY_BYTES)
             except PartError as e:
                 return self._json({"error": e.msg}, e.status)
             return self._open_copy(_clean_name(os.path.basename(path)) or "Dokument", data,
-                                   _roots(searcher.db_path), quarantine=False)
+                                   _roots(searcher.db_path), quarantine=quarantine if quarantine is not None else False)
 
         def _post(self, url):
             if self.headers.get("X-Belegsuche") != "1":
@@ -639,8 +820,8 @@ def serve(db_path: Path, port: int = 8765, open_browser: bool = True) -> int:
     old_handlers = _stop_on_hangup()
     try:
         try:
-            AttachmentTemp.cleanup_stale()          # Anhang-Kopien früherer Läufe (älter als 24 h)
-        except OSError:
+            AttachmentTemp.cleanup_stale(roots=_roots(db_path))
+        except (OSError, sqlite3.Error):
             pass
         port = httpd.server_address[1]          # bei --port 0 vergibt das System den Port
         httpd.RequestHandlerClass = make_handler(Searcher(db_path), port, attachments)
@@ -659,7 +840,12 @@ def serve(db_path: Path, port: int = 8765, open_browser: bool = True) -> int:
         if browser_timer is not None:
             browser_timer.cancel()
         httpd.server_close()
-        attachments.cleanup()                   # geöffnete Anhänge (Temp-Kopien) wegräumen
+        try:
+            roots = _roots(db_path)
+        except (OSError, sqlite3.Error):
+            attachments.cleanup(remove=False)      # Ohne aktuelle Archivgrenzen nur die Sitzung freigeben.
+        else:
+            attachments.cleanup(roots=roots)
     return 0
 
 

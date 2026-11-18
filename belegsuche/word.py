@@ -48,18 +48,37 @@ class _XmlBroken(ExtractError):
     """XML eines docx-Teils ist nicht wohlgeformt (dann versucht es textutil)."""
 
 
+class _WordTreeBuilder(ET.TreeBuilder):
+    def doctype(self, name, pubid, system):
+        raise ExtractError("Word-Datei nicht lesbar (ungewöhnlicher XML-Inhalt)")
+
+
+def _canonical_tag(tag: str) -> str:
+    for ns in _W_OTHER_NS:
+        prefix = "{" + ns.decode() + "}"
+        if tag.startswith(prefix):
+            return _W + tag[len(prefix):]
+    return tag
+
+
 def _xml_text(data: bytes) -> str:
     """Sichtbarer Text eines WordprocessingML-Teils. Absätze werden Zeilen, Tabellenzellen durch Tab getrennt,
     harte Seitenumbrüche werden \\f. Ersatzdarstellungen (mc:Fallback) werden übersprungen – sonst stünde der
     Text von Textfeldern doppelt da."""
     if b"<!DOCTYPE" in data or b"<!ENTITY" in data:
         raise ExtractError("Word-Datei nicht lesbar (ungewöhnlicher XML-Inhalt)")
-    for ns in _W_OTHER_NS:
-        data = data.replace(ns, _W_NS)
+    if len(data) > MAX_XML_BYTES:
+        raise ExtractError("Word-Datei zu groß zum Lesen (XML-Inhalt)")
     try:
-        root = ET.fromstring(data)
+        # Originalbytes erhalten: der XML-Parser berücksichtigt BOM und Deklaration
+        # auch bei UTF-16 oder Windows-1252. Erst danach die Namensräume vereinheitlichen.
+        root = ET.fromstring(data, parser=ET.XMLParser(target=_WordTreeBuilder()))
     except ET.ParseError as e:
         raise _XmlBroken(f"Word-Datei beschädigt oder nicht lesbar ({e})") from e
+    for el in root.iter():
+        el.tag = _canonical_tag(el.tag)
+        if el.attrib:
+            el.attrib = {_canonical_tag(k): v for k, v in el.attrib.items()}
     out: list[str] = []
     stack: list[tuple[ET.Element, bool]] = [(root, False)]
     while stack:                      # ohne Rekursion: tief verschachtelte Dateien sprengen den Stapel nicht
@@ -200,6 +219,8 @@ def is_word_zip(data: bytes) -> bool:
 
 def word_text(data: bytes, notes: list[str]) -> list[str]:
     """Texte der Seiten einer Word-Datei (als Bytes)."""
+    if len(data) > MAX_WORD_BYTES:
+        raise ExtractError(f"Word-Datei zu groß ({len(data) // (1024 * 1024)} MB)")
     kind = sniff(data)
     if kind == "zip":
         try:
@@ -242,25 +263,47 @@ def _decode_text(data: bytes) -> str:
         return data.decode("cp1252", errors="replace")
 
 
-def _disguised_text(data: bytes) -> str | None:
-    """.doc, das in Wahrheit Word-2003-XML, HTML (Word „Als Webseite speichern“) oder reiner Text ist. HTML ohne
-    textutil (das lüde Bilder und Stile aus dem Netz nach). None: keines davon."""
-    head = data[:4096]
+def text_word_kind(data: bytes) -> str | None:
+    """Textbasiertes Word: 'wordml', 'html' oder 'text', sonst None.
+
+    Nur Erkennung an höchstens 8 KiB, ohne Konvertierung oder Subprozess. Aufrufer
+    müssen zusätzlich Word-Endung/MIME und ihre Größen-/Ausgaberegeln prüfen.
+    Klar erkennbares Excel und fremdes XML werden nicht als Word behandelt.
+    """
+    if not data or len(data) > MAX_WORD_BYTES or sniff(data) is not None:
+        return None
+    head = data[:8192]
     utf16 = head.startswith((b"\xff\xfe", b"\xfe\xff"))
     if (not utf16 and b"\x00" in head) or not head.strip():
         return None                                  # binär: kein Text
-    text = _decode_text(data)
+    text = _decode_text(head)
     start = text.lstrip()[:2048].lower()
-    if start.startswith("<?xml") and ("schemas.microsoft.com/office/word/2003/wordml" in text[:8192]
-                                      or "wordprocessingml" in text[:8192]):
-        return _xml_text(text.encode("utf-8").replace(b'encoding="UTF-16"', b'encoding="UTF-8"')
-                         .replace(b"encoding='UTF-16'", b"encoding='UTF-8'"))
+    low = text.lower()
+    if ("urn:schemas-microsoft-com:office:spreadsheet" in low
+            or re.search(r"<(?:\w+:)?excelworkbook(?:\s|/?>)", low)
+            or re.search(r"<(?:meta\b[^>]*\bcontent|\?mso-application\b[^>]*\bprogid)"
+                         r"\s*=\s*[\"']?excel\.sheet(?:[.\s\"'>/]|$)", low)):
+        return None
+    if start.startswith("<") and any(ns.decode() in text for ns in (_W_NS, *_W_OTHER_NS)):
+        return "wordml"
     if start.startswith(("<!doctype html", "<html")) or "<html" in start[:512]:
-        from .mail import html_to_text
-        return html_to_text(text)
+        return "html"
+    if start.startswith("<"):
+        return None                                  # anderes XML/Markup ist keine Word-Datei
     printable = sum(1 for c in text[:4096] if c.isprintable() or c in "\n\r\t\f")
-    if printable >= 0.95 * len(text[:4096]):
-        return text
+    return "text" if printable >= 0.95 * len(text[:4096]) else None
+
+
+def _disguised_text(data: bytes) -> str | None:
+    """Text aus Word-2003-XML, HTML oder Text; HTML ohne Nachladen oder textutil."""
+    kind = text_word_kind(data)
+    if kind == "wordml":
+        return _xml_text(data)
+    if kind == "html":
+        from .mail import html_to_text
+        return html_to_text(_decode_text(data))
+    if kind == "text":
+        return _decode_text(data)
     return None
 
 

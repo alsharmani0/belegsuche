@@ -3,6 +3,63 @@
 Bedienung und Messbefehle stehen in der [README](../README.md). Die früheren Messwerte sind unten
 getrennt aufgeführt: Die beiden alten Fragenlisten sind kein Blindtest für den aktuellen Code.
 
+## Projektprüfung und Indexformat 13
+
+- Entfernte Ordner- und Datei-IDs werden im selben Index künftig freigehalten. Ein alter Browserlink auf
+  einen entfernten Beleg liefert HTTP 404. Ein wiederholter CLI-Befehl mit der alten Ordner-ID kann keinen
+  neu hinzugekommenen Ordner entfernen. IDs, die vor der Umstellung bereits neu vergeben waren, lassen sich
+  rückwirkend nicht zuordnen.
+- Suchtreffer, Qualitätsauswertung, Ordnerübersicht und Bericht lesen jeweils aus einem konsistenten
+  Datenbankstand. Zuvor konnte die Suche beim Erstellen des Ausschnitts abbrechen, wenn ein anderer Prozess
+  die Seite zwischenzeitlich ersetzt oder entfernt hatte. Beim Einlesen und bei Ordneränderungen prüft
+  die CLI den Ablageort der Indexsperre, bevor sie eine Datei im Archiv anlegen kann.
+- Die Qualitätsauswertung erhält Anführungszeichen aus Excel-CSV-Dateien und unterscheidet eigenständige
+  Dateien auch bei gleichlautenden normalisierten Pfaden. Für einen synthetischen Index mit 100.000 Dateien
+  und einer Zielfrage sank der von Python gemessene Spitzenbedarf der Pfadzuordnung von 86 MiB auf unter
+  0,1 MiB. Für die Auswahl eines Ausschnitts mit 20.000 Worttreffern sank die Laufzeit von 3,65 auf 0,11 s.
+- Auf 120.000 synthetischen, kurzen Einzelseiten dauerte die erste Suche nach einer Rechnungsnummer
+  einschließlich Wortschatzaufbau 0,19 s. Mit geladenem Wortschatz lagen die Mediane von vier
+  Beispielanfragen bei 1 bis 62 ms (jeweils drei Wiederholungen). Die Suchdiagnose zählt die untersuchten
+  Kandidatenseiten jetzt auch dann korrekt, wenn keine Mail auf den Treffer verweist.
+- Format 13 liest ältere TNEF-Mails gezielt nach. UTF-16-HTML, RTF-Bilddaten und HTML-Anhänge mit frei
+  vergebenem Anzeigenamen lieferten vorher abgeschnittenen Text oder HTML-Markup.
+  Gekürzte Seiten dienen nicht mehr als Vorlage für eine vollständige Anlage. Bereits gekürzte Übernahmen
+  lassen sich reparieren, wenn der Index den zugehörigen Kürzungshinweis der eigenständigen Datei noch enthält.
+
+**Verifikation auf macOS.** Die vollständigen Läufe bestanden unter Python 3.12 mit 994 und unter
+Python 3.11 mit 995 Tests. Nach den letzten Korrekturen bestanden auf beiden Versionen jeweils alle 135
+betroffenen Such-, CLI-, Mail- und Indextests. Das installierte Wheel fand bei allen 26 Entwicklungs- und
+16 Holdout-Fragen das erwartete Dokument auf Platz 1 und die richtige Seite. SHA-256 und Änderungszeit
+aller 64 fiktiven Originale blieben erhalten. Beim zweiten Indexlauf wurden null Dateien neu verarbeitet.
+Die Browserprüfung umfasste Desktop- und Handybreite, PDF- und Anhangsseiten, Offline-Treffer und die
+Rückkehr zur Ordnerübersicht. Der produktive Index wurde für diese Prüfung nicht geöffnet.
+
+## Korrekturen aus der Mail-/Word-Prüfung
+
+- **Temp-Kopien:** Das Aufräumen verlangt ein passendes Besitzmanifest und prüft Datei-, Ordneridentität und
+  Inhalt. Aktive Sitzungen, unbekannte Altordner und Überschneidungen mit Archivwurzeln werden ausgelassen.
+  Ohne lesbare Archivgrenzen erfolgt beim Start keine Bereinigung. Schlägt eine erforderliche
+  Quarantänemarkierung fehl, wird die Kopie nicht an eine App übergeben. Standalone-Word und verlinkte Word-Dokumente
+  übernehmen eine vorhandene Markierung vom geöffneten Original.
+- **Indexformat 12:** Der nächste Indexlauf prüft auf fehlerhaft klassifizierte Alt-Anhänge und wertet alte
+  TNEF-Container neu aus. Wiederholbare Teilfehler werden separat gespeichert; ein solcher unvollständiger
+  Mailstand ist keine Vorlage für eine Kopie. Nachträglich eingelesene Ziele von DOMUS-Platzhaltern werden
+  ohne neue Mail-OCR zugeordnet.
+- **Suchtest:** Dubletten werden über ihre tatsächliche Datei-, Teil- und Seitenidentität geprüft. Eine
+  beschriftete Mailkopie kann damit ebenso zählen wie ein zusammengefasster identischer PDF-Anhang.
+  Dateirang und korrekt gefundene Anhangsseite werden getrennt ausgewiesen.
+- **Texterkennung und Formate:** Word-2003-XML verwendet die Kodierung der Originalbytes. Textbasierte
+  Word-Anlagen werden indexiert und als Klartext bereitgestellt. Weiche MIME-Umbrüche werden korrekt
+  entfaltet. TNEF berücksichtigt die eigene Internet-Codepage von binärem HTML und unterscheidet den
+  sichtbaren Anzeigenamen vom Dateinamen für die Typbestimmung.
+
+**Verifiziert mit fiktiven Belegen:** 964 Tests bestanden. Bei einer getrennten CLI-Probe lieferten ein
+mit dem damaligen Code erzeugter Format-10-Index, dessen Format-11-Zwischenstand und ein neuer Format-12-Index
+dieselben PDF-Teile; beim nächsten Lauf wurden null Dateien neu eingelesen. Ein frisch gebautes Wheel fand
+drei vorgegebene Mail-/Teil-/Seitenziele korrekt. Bei SIGINT und SIGHUP während der parallelen Mailverarbeitung
+blieben die fiktiven Originale unverändert; der Wiederanlauf las jeweils alle 40 Anhänge vollständig.
+Es wurden nur temporäre Indexe verwendet. Native Mail-/Word-Starts wurden in den Öffnungstests abgefangen.
+
 ## Nachbesserung nach der Prüfung der winmail.dat-Unterstützung (16.11.2026)
 
 Zwei Prüfungen (Code/Sicherheit und Probelauf mit echten Daten) ergaben keinen schweren Befund; behoben sind:
@@ -221,21 +278,19 @@ Ein privater Suchindex wurde für diese Projektprüfung nicht geöffnet oder mig
 
 ## Indexformat
 
-Indexformat 10 ergänzt die Tabellen `parts` und `mails` und schreibt bei E-Mails Betreff, Absender, Empfänger,
-Datum und den Anhangnamen in die Pfadspalte des Suchindex. Indexformat 11 öffnet `winmail.dat` (Teil `tnef`,
-Anhänge darin mit `mime_path` „…!k“). Ein Index im Format 9 oder 10 wird ohne Neuaufbau umgestellt (nur das Format
-wird vermerkt; vorhandene Suchzeilen ändern sich nicht). Bei 10 → 11 bekommen außerdem Teile, die Format 10 als PDF
-gelesen hat, obwohl sie eine `winmail.dat` sind (`kind 'pdf'` mit Typ `application/ms-tnef` oder Name
-`winmail.dat`), den Hinweis einer nur vermerkten `winmail.dat`. Sonst ändert die Umstellung nichts: die Mails
-gelten weiter als fertig, Suche und Oberfläche zeigen sie nicht als „geändert“. Erst `belegsuche index` merkt zu
-Beginn – nur in den Ordnern, die er einliest, und bei jedem Lauf, damit auch Mails eines noch laufenden älteren
-Programms erfasst werden – genau die fertigen Mails zum Neueinlesen vor, deren `winmail.dat` Format 10 nur
-vermerkt hat (`parts.note` „nicht ausgewertet (winmail.dat aus Outlook)“). Ihr alter Stand wird nicht übernommen,
-auch nicht von einer gleichen Mail an anderem Ort; die schon erkannten Seiten ihrer übrigen Anhänge übernimmt das
-Neulesen aus ihren eigenen Teilen, ohne neue Texterkennung. Bis dahin bleibt ihr bisheriger Text durchsuchbar; der
-Bericht nennt sie „noch nicht geöffnet“. Noch ältere Suchindizes werden aus ihren gespeicherten Seitentexten neu
-aufgebaut – auch bei bereits indizierten Dateien, die auf das erneute Einlesen warten. Bestehende OCR-Ergebnisse
-werden bei diesen Umstellungen nicht ersetzt. Ältere Programmversionen lehnen einen Index im Format 11 ab.
+Aktuell ist **Format 13**. Format 10 führte Mailteile und Mailköpfe ein, Format 11 die separat
+durchsuchbaren Anhänge aus `winmail.dat`. Format 12 ergänzt pro Teil den Status für wiederholbare Fehler
+und die Revision der Inhaltserkennung. Format 13 markiert die aktuelle TNEF-Erkennung und hält vergebene
+Ordner- und Datei-IDs fest. Für die Umstellung aus den Formaten 9 bis 12 bleiben die vorhandenen FTS-Zeilen
+erhalten. Der erste schreibende Zugriff stellt die Datenbankstruktur um. Ältere Programmversionen lehnen
+den aktualisierten Index ab.
+
+Erst beim Einlesen der ausgewählten Ordner prüft Belegsuche verdächtige Altteile gegen die erreichbare
+Originalmail. Eine neutral benannte echte PDF bleibt eine PDF; ein früher als PDF gespeicherter TNEF-Strom
+wird als Container samt Anlagen neu eingelesen. Alte, schon erkannte TNEF-Container werden einmal auf die
+neue Text-/Dateinamenerkennung gebracht. Vollständige, unveränderte PDF- und Bildseiten können übernommen
+werden. Unveränderte Mailtexte oder Word-Dokumente außerhalb dieser gezielten Nachprüfung werden nicht
+pauschal neu extrahiert. Zum Vergleich aller Texte dient ein separater frischer Index.
 
 ## Bekannte Grenzen
 
@@ -246,9 +301,7 @@ werden bei diesen Umstellungen nicht ersetzt. Ältere Programmversionen lehnen e
   ein Hinweis), ebenso verschlüsselte Outlook-Nachrichten (S/MIME); bei Kalendereinladungen werden nur die Anhänge
   gelesen, nicht die Termindaten. Eingebettete Nachrichten und `winmail.dat` in der `winmail.dat` bis Tiefe 2. Der
   Text der `winmail.dat` zählt nur, wenn die Mail keinen eigenen hat. Die Nachrichtenattribute (Absender, Datum)
-  der `winmail.dat` werden nicht ausgewertet; Kopf und Datum kommen aus der Mail. Eine `winmail.dat`, die Format 10
-  als PDF gelesen hat, erfasst nur die Umstellung selbst – schreibt danach noch ein älteres Programm weiter, bleibt
-  so ein Teil stehen (im echten Index gab es keinen). Bei präparierten Dateien, die das Budget für Eigenschaften
+  der `winmail.dat` werden nicht ausgewertet; Kopf und Datum kommen aus der Mail. Bei Dateien, die das Budget für Eigenschaften
   aufbrauchen, fehlen Name und Art der übrigen Anhänge (Name dann aus dem Titel); ihre Daten werden gelesen.
 - Bilder in Word-Dateien werden nicht per Texterkennung gelesen (eingescannte Belege in Word bleiben ohne Text,
   mit Hinweis). Seiten einer Word-Datei gibt es nur an harten Seitenumbrüchen; sonst ist sie eine Seite.
@@ -275,7 +328,8 @@ werden bei diesen Umstellungen nicht ersetzt. Ältere Programmversionen lehnen e
    abgelesene Kennungen, Daten und Beträge. Beide Engines lieferten alle 50 Werte; Apple verwendete bei einem
    Betrag einen Punkt statt des gedruckten Kommas. Das war kein Vergleich vollständiger Transkripte und kein
    Qualitätsnachweis für die inzwischen geänderte Extraktion.
-3. **Große Bestände über 100.000 Seiten:** Suchzeit nach den Korrekturen nicht erneut gemessen.
+3. **Große Bestände über 100.000 Seiten:** Für kurze synthetische Seiten liegen aktuelle Zeiten vor.
+   Offen ist die Suchzeit bei einem vergleichbar großen, gemischten Archiv mit mehrseitigen Scans und Mails.
 4. **Originalschutz unter echten Bedingungen:** exFAT-SSD, sehr große Ordner, lange Läufe mit `--parallel`.
 5. **Zeitlimit beim Einlesen:** Ob 10 Minuten je Seite auf dem Zielgerät passen (große Scans, schwache Hardware),
    ist nicht gemessen.
@@ -294,3 +348,13 @@ werden bei diesen Umstellungen nicht ersetzt. Ältere Programmversionen lehnen e
    `2^53 - 1` nicht mehr jede ID exakt darstellen; der Downloadpfad lässt höchstens 18 Ziffern zu.
    Für normale, automatisch vergebene IDs ist das praktisch unerheblich. Falls importierte IDs dieser
    Größe unterstützt werden sollen, ist ein einheitlicher String- oder Wertebereichsvertrag nötig.
+10. **JSON-Auswertung.** Für bestehende Auswertungen behält ein Treffer auf der falschen Gesamtseite die
+    Dateikategorie `ok`. Die Felder `ziel_erfuellt` und `seite_falsch` geben den Seitenfehler korrekt an.
+    Vor einer Vereinheitlichung mit der Kategorie `Fundstelle` für falsche Anhangsseiten ist zu klären,
+    welche Auswertungen noch die bisherige Kategorie verwenden.
+11. **Öffnen auf dem Arbeitsplatz.** Die Browser- und HTTP-Prüfungen verwenden erfundene Dateien und
+    fangen native Öffnungsbefehle ab. Das sichtbare Verhalten von Apple Mail, Word und Finder auf dem
+    Zielgerät ist noch zu prüfen.
+12. **Verteilung als Wheel.** Bisherige Pakete und der aktuelle Build tragen dieselbe Versionsnummer
+    `0.1.0`. Vor einer Verteilung braucht der neue Build eine eigene Paketversion, damit sich Stände
+    mit unterschiedlichen Indexformaten bei Installation und Support unterscheiden lassen.

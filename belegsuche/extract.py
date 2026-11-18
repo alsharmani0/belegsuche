@@ -74,6 +74,7 @@ class PartInfo:
     sha256: str | None = None
     mime_path: str | None = None
     note: str | None = None
+    retryable: bool = False           # technischer Teilfehler; explizit erneut versuchen, kein üblicher Skip
 
 
 @dataclass

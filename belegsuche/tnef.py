@@ -115,6 +115,10 @@ def decode_cp(raw: bytes, codec: str) -> str:
 
 
 def _decode8(raw: bytes, cp: int | None) -> str:
+    if cp in (1200, 1201):
+        # Binäres PR_HTML darf UTF-16 enthalten: seine Nullbytes sind Teil der
+        # Zeichen, erst das dekodierte NUL beendet den Text.
+        return decode_cp(raw, codec_name(cp)).split("\x00", 1)[0].removeprefix("\ufeff")
     return decode_cp(bytes(raw).split(b"\x00", 1)[0], codec_name(cp))
 
 
@@ -168,6 +172,14 @@ class Attachment:
         return ""
 
     @property
+    def file_name(self) -> str:
+        """Dateiname für Dateityp/Endung; PR_DISPLAY_NAME kann eine freie Beschriftung ohne Endung sein."""
+        for n in (self.long_name, self.filename, self.title, self.transport_name):
+            if n and n.strip():
+                return n.strip()
+        return ""
+
+    @property
     def inline(self) -> bool:
         """Bild im Mailtext (Signatur-Logo o. Ä.): Content-ID, Kennzeichen „MHTML“ oder versteckt."""
         return bool(self.content_id) or bool(self.flags & ATT_MHTML_REF) or self.hidden
@@ -180,6 +192,7 @@ class Message:
     sender: str | None = None
     oem_codepage: int | None = None
     codepage: int | None = None         # PR_MESSAGE_CODEPAGE bzw. PR_INTERNET_CPID
+    internet_codepage: int | None = None  # eigene Kodierung des binären PR_HTML
     body: str | None = None             # PR_BODY oder attBody
     html: str | None = None             # PR_HTML / PR_BODY_HTML
     rtf_compressed: bytes | None = None
@@ -420,7 +433,9 @@ def _apply_message_props(msg: Message, props, raw: dict) -> None:
             if (s := _str_of(ptype, vals)) is not None:
                 raw.setdefault(pid, s)
         elif pid == PR_HTML and base in (PT_UNICODE, PT_BINARY, PT_STRING8) and vals:
-            raw.setdefault("html", _Str(vals[0], base == PT_UNICODE))
+            if "html" not in raw:
+                raw["html"] = _Str(vals[0], base == PT_UNICODE)
+                raw["html_binary"] = base == PT_BINARY
         elif pid == PR_RTF_COMPRESSED and base == PT_BINARY and vals:
             raw.setdefault("rtf", vals[0])
 
@@ -538,7 +553,8 @@ def _message_attr(msg: Message, num: int, chunk, raw: dict, budget: Budget) -> N
 
 
 def _finish_message(msg: Message, raw: dict) -> None:
-    msg.codepage = raw.get(f"cp{PR_MESSAGE_CODEPAGE}") or raw.get(f"cp{PR_INTERNET_CPID}") or None
+    msg.internet_codepage = raw.get(f"cp{PR_INTERNET_CPID}") or None
+    msg.codepage = raw.get(f"cp{PR_MESSAGE_CODEPAGE}") or msg.internet_codepage
     cp_props = msg.codepage or msg.oem_codepage
     cp_oem = msg.oem_codepage or msg.codepage
 
@@ -550,7 +566,10 @@ def _finish_message(msg: Message, raw: dict) -> None:
     msg.sender = text(PR_SENT_REPRESENTING_NAME, cp_props, MAX_NAME_CHARS) \
         or text(PR_SENDER_NAME, cp_props, MAX_NAME_CHARS)
     msg.body = text(PR_BODY, cp_props) or text("body", cp_oem)
-    msg.html = text("html", cp_props)
+    # PR_HTML ist binär und hat mit PR_INTERNET_CPID eine eigene Kodierung. STRING8-/Unicode-Varianten
+    # bleiben MAPI-Strings; ohne HTML-Codepage gilt zunächst die Transport-, dann die Nachrichten-Codepage.
+    cp_html = (msg.internet_codepage or msg.oem_codepage or msg.codepage) if raw.get("html_binary") else cp_props
+    msg.html = text("html", cp_html)
     msg.rtf_compressed = raw.get("rtf")
     for att in msg.attachments:
         _finish_attachment(att, cp_props, cp_oem)
@@ -646,7 +665,9 @@ def rtf_to_text(rtf: bytes) -> tuple[str, str]:
     skip, tag, htmlrtf, uc = False, False, False, 1
     first = star = False
     pending_skip = 0                     # Ersatzzeichen nach \uN, die übersprungen werden
-    for mt in _RTF_TOKEN.finditer(rtf):
+    pos = 0
+    while (mt := _RTF_TOKEN.search(rtf, pos)) is not None:
+        pos = mt.end()
         word, num, hexb, sym, brace, text = mt.groups()
         if brace is not None:
             if brace == b"{":
@@ -680,6 +701,13 @@ def rtf_to_text(rtf: bytes) -> tuple[str, str]:
                 first = star = False
                 if word in (b"htmltag", b"mhtmltag"):
                     continue
+            if word == b"bin":
+                # RTF-Binärdaten (z. B. Bilder) enthalten auch {, } und \\.
+                # Sie sind keine Steuerzeichen und dürfen den Gruppenstapel
+                # nicht verändern oder nachfolgenden Mailtext verschlucken.
+                flush()
+                pos = min(len(rtf), pos + max(0, int(num or 0)))
+                continue
             if word == b"htmlrtf":
                 htmlrtf = num != b"0"
                 continue

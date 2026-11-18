@@ -28,11 +28,7 @@ from . import db as dbm
 from .extract import (IMAGE_EXT, MAIL_EXT, NOTE_PREFIX, PDF_EXT, WORD_EXT, Extracted, ExtractError, MailInfo, PageText,
                       PartInfo, extract_full, extract_with_notes)
 
-IGNORED_DIRS = {
-    ".Spotlight-V100", ".Trashes", ".fseventsd", ".TemporaryItems", ".DocumentRevisions-V100",
-    "$RECYCLE.BIN", "System Volume Information", "__MACOSX",
-}
-IGNORED_FILES = {"Thumbs.db", "desktop.ini", "Icon\r"}
+IGNORED_NAMES = {"$RECYCLE.BIN", "System Volume Information", "__MACOSX", "Thumbs.db", "desktop.ini", "Icon\r"}
 MAX_ATTEMPTS = 3
 MISSING_SAFETY_RATIO = 0.5   # mehr als die Hälfte verschwunden? -> vermutlich falscher/leerer Ordner
 PERMANENT_ERRORS = ("PDF ist passwortgeschützt", "Word-Datei ist passwortgeschützt")   # Wiederholen hilft nicht
@@ -49,7 +45,7 @@ ROOT_LOST_MSG = ("Ordner nicht mehr erreichbar (SSD getrennt?) – Einlesen ange
 
 
 def _ignored(name: str) -> bool:
-    return name.startswith(".") or name.startswith("~$") or name in IGNORED_FILES or name in IGNORED_DIRS
+    return name.startswith((".", "~$")) or name in IGNORED_NAMES
 
 
 def kind_for(ext: str) -> str:
@@ -193,7 +189,9 @@ def add_root(con, path: str | Path, log: Callable[[str], None] = print) -> int:
         log(f"Ordner {old['id']} ist offenbar umgezogen (umbenannte SSD?): {old['path']} → {p}. "
             "Bereits eingelesene Dateien werden übernommen.")
         return old["id"]
-    cur = con.execute("INSERT INTO roots(path, added_at) VALUES (?, ?)", (p, time.time()))
+    cur = con.execute("INSERT INTO roots(id, path, added_at) VALUES ("
+                      "(SELECT CAST(value AS INTEGER)+1 FROM meta WHERE key='root_id_highwater'), ?, ?)",
+                      (p, time.time()))
     con.commit()
     return cur.lastrowid
 
@@ -217,7 +215,7 @@ def move_root(con, root_id: int, new_path: str | Path) -> str | None:
     return None
 
 
-def acquire_lock(db_path: str | Path) -> IO:
+def acquire_lock(db_path: str | Path, *, roots=()) -> IO:
     """Sperre gegen zwei gleichzeitige Einlese-Läufe auf denselben Index.
 
     Die Sperrdatei hängt an der Datenbankdatei selbst (Gerät + Inode) und liegt in einem gemeinsamen
@@ -226,6 +224,11 @@ def acquire_lock(db_path: str | Path) -> IO:
     """
     import fcntl
     import tempfile
+    lock_dir = Path(tempfile.gettempdir()) / "belegsuche-sperren"
+    for root in roots:
+        if dbm.path_inside(lock_dir, root):
+            raise SystemExit(f"Der Temp-Ordner für die Indexsperre ({lock_dir}) liegt im eingelesenen Ordner "
+                             f"{root}. TMPDIR auf einen anderen Ordner setzen.")
     p = Path(db_path).expanduser()
     p.parent.mkdir(parents=True, exist_ok=True)
     real = Path(os.path.realpath(p))
@@ -236,9 +239,8 @@ def acquire_lock(db_path: str | Path) -> IO:
     else:
         os.close(fd)                     # leere Datei ist für SQLite eine gültige neue Datenbank
     st = os.stat(real)
-    lock_dir = Path(tempfile.gettempdir()) / "belegsuche-sperren"
     lock_dir.mkdir(exist_ok=True)
-    f = open(lock_dir / f"{st.st_dev}-{st.st_ino}.lock", "w")
+    f = open(lock_dir / f"{st.st_dev}-{st.st_ino}.lock", "a")
     try:
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as e:
@@ -318,8 +320,9 @@ def scan_root(con, root_id: int, root_path: str, confirm_missing: bool = False,
             if row is None:
                 status = "pending" if kind != "unsupported" else "skipped"
                 con.execute(
-                    "INSERT INTO files(root_id, relpath, ext, kind, size, mtime, status, error, seen_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO files(id, root_id, relpath, ext, kind, size, mtime, status, error, seen_at)"
+                    " VALUES ((SELECT CAST(value AS INTEGER)+1 FROM meta WHERE key='file_id_highwater'),"
+                    " ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (root_id, rel, ext, kind, s.st_size, s.st_mtime, status,
                      "Dateityp nicht unterstützt" if kind == "unsupported" else None, now))
                 if kind == "unsupported":
@@ -416,9 +419,9 @@ def _write_pages(con, file_id: int, relpath: str, res: Extracted | list[PageText
         # Platzhalter: note ist der Pfad der Datei so wie auf der Platte (wie files.relpath), nicht umgeformt
         note = t.note if t.kind == "link" else _nfc(t.note)
         con.execute("INSERT INTO parts(file_id, part_no, first_page, n_pages, kind, name, mime, size, sha256,"
-                    " mime_path, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " mime_path, note, retryable, content_revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (file_id, t.part_no, t.first_page, t.n_pages, t.kind, _nfc(t.name), t.mime, t.size, t.sha256,
-                     t.mime_path, note))
+                     t.mime_path, note, int(t.retryable), int(dbm.INDEX_FORMAT)))
     if res.mail is not None:
         m = res.mail
         con.execute("INSERT INTO mails(file_id, subject, sender, recipients, sent_at, message_id)"
@@ -440,7 +443,7 @@ def _pages_of(con, file_id: int, first: int | None = None, last: int | None = No
 
 def _parts_of(con, file_id: int) -> list[PartInfo]:
     return [PartInfo(r["part_no"], r["kind"], r["first_page"], r["n_pages"], r["name"], r["mime"], r["size"],
-                     r["sha256"], r["mime_path"], r["note"])
+                     r["sha256"], r["mime_path"], r["note"], bool(r["retryable"]))
             for r in con.execute("SELECT * FROM parts WHERE file_id = ? ORDER BY part_no", (file_id,))]
 
 
@@ -456,14 +459,27 @@ def _stored(con, file_id: int) -> Extracted:
 
 
 REUSE_KINDS = ("pdf", "image", "word")    # Anhänge, deren Seiten sich 1:1 von gleichem Inhalt übernehmen lassen
+_TRUNCATED_FILE_NOTE = f"{NOTE_PREFIX} nur die ersten % von % Seiten eingelesen%"
+
+
+def _incomplete_mail_sql(file_expr: str) -> str:
+    """SQL-Ausdruck (interner Platzhalter/Spaltenname), danach Parameter für REUSED_NOTE und Begrenzungshinweis."""
+    return ("EXISTS (SELECT 1 FROM parts t JOIN files short ON short.sha256=t.sha256"
+            f" AND short.pages=t.n_pages WHERE t.file_id={file_expr} AND t.note=? AND short.error LIKE ?)")
 
 
 def _pages_for_sha(con, sha: str, own_id: int | None = None) -> list[PageText] | None:
     """Seiten eines schon eingelesenen Inhalts: als eigene Datei oder als Anhang einer fertigen Mail – oder als
     Anhang der Mail own_id selbst (sie wird gerade neu gelesen, z. B. weil ihre winmail.dat jetzt ausgewertet wird)."""
+    # Hinweise können gekürzte oder teilweise gelesene Dateien kennzeichnen. Reine Seitenübernahme könnte
+    # diese Einschränkung nicht mitgeben und würde einen unvollständigen Anhang als vollständig ausweisen.
     row = con.execute(
         "SELECT f.id FROM files f WHERE f.sha256 = ? AND f.status IN ('done', 'missing') AND f.kind IN (?, ?, ?)"
-        " AND EXISTS (SELECT 1 FROM pages p WHERE p.file_id = f.id) LIMIT 1", (sha, *REUSE_KINDS)).fetchone()
+        " AND f.error IS NULL"
+        " AND NOT EXISTS (SELECT 1 FROM files short WHERE short.sha256=f.sha256 AND short.pages=f.pages"
+        " AND short.error LIKE ?)"
+        " AND EXISTS (SELECT 1 FROM pages p WHERE p.file_id = f.id) LIMIT 1",
+        (sha, *REUSE_KINDS, _TRUNCATED_FILE_NOTE)).fetchone()
     if row:
         return _pages_of(con, row[0])
     from .mail import REUSED_NOTE
@@ -471,8 +487,10 @@ def _pages_for_sha(con, sha: str, own_id: int | None = None) -> list[PageText] |
     row = con.execute(
         "SELECT t.file_id, t.first_page, t.n_pages FROM parts t JOIN files f ON f.id = t.file_id"
         " WHERE t.sha256 = ? AND t.n_pages > 0 AND t.first_page IS NOT NULL AND t.kind IN (?, ?, ?)"
-        " AND (t.note IS NULL OR t.note = ?) AND (f.status = 'done' OR f.id = ?) LIMIT 1",
-        (sha, *REUSE_KINDS, REUSED_NOTE, own_id)).fetchone()
+        " AND (t.note IS NULL OR t.note = ?) AND (f.status = 'done' OR f.id = ?)"
+        " AND NOT EXISTS (SELECT 1 FROM files short WHERE short.sha256=t.sha256 AND short.pages=t.n_pages"
+        " AND short.error LIKE ?) LIMIT 1",
+        (sha, *REUSE_KINDS, REUSED_NOTE, own_id, _TRUNCATED_FILE_NOTE)).fetchone()
     if row:
         pages = _pages_of(con, row[0], row[1], row[1] + row[2] - 1)
         if len(pages) == row[2]:
@@ -557,6 +575,8 @@ def retry_errors(con, include_permanent: bool = False, *, root_ids: list[int] | 
     n += con.execute(f"UPDATE files SET status='pending', attempts=0, error=NULL WHERE status='done' AND {_SAFE_MAILS}"
                      + scope,
                      (_safe_note(), *root_args)).rowcount
+    n += con.execute("UPDATE files SET status='pending', attempts=0, error=NULL WHERE status='done'"
+                     " AND id IN (SELECT file_id FROM parts WHERE retryable=1)" + scope, root_args).rowcount
     con.commit()
     return n
 
@@ -574,6 +594,119 @@ def count_safe_mails(con, root_ids: list[int] | None = None) -> int:
     scope, args = _root_scope(root_ids)
     return con.execute(f"SELECT count(*) FROM files WHERE status='done' AND {_SAFE_MAILS}" + scope,
                        (_safe_note(), *args)).fetchone()[0]
+
+
+def count_retryable_mails(con, root_ids: list[int] | None = None) -> int:
+    """Fertige Mails mit ausdrücklich wiederholbaren technischen Teilfehlern (kein pauschales Wiederholen von Skips)."""
+    scope, args = _root_scope(root_ids)
+    return con.execute("SELECT count(*) FROM files WHERE status='done' AND id IN"
+                       " (SELECT file_id FROM parts WHERE retryable=1)" + scope, args).fetchone()[0]
+
+
+def _legacy_content_sql(alias: str = "t") -> str:
+    """Kleine Zielmenge der alten Fehlklassifikationen; eindeutig benannte normale PDFs bleiben unangetastet."""
+    if int(dbm.INDEX_FORMAT) < dbm.MAIL_CLASSIFICATION_REVISION:
+        return "0"
+    name = f"lower(coalesce({alias}.name,''))"
+    mime = f"lower(coalesce({alias}.mime,''))"
+    suspect_name = (f"{name}='' OR {mime} IN ('application/ms-tnef','application/vnd.ms-tnef') OR {name} LIKE '%.dat'"
+                    f" OR ({alias}.kind='skipped' AND ({name} LIKE '%.doc' OR {name} LIKE '%.dot' OR "
+                    f"{mime} IN ('application/msword','application/vnd.ms-word')))"
+                    f" OR ({alias}.kind='pdf' AND {mime}='application/octet-stream' AND {name} NOT LIKE '%.pdf')")
+    tnef_revision = min(int(dbm.INDEX_FORMAT), dbm.MAIL_CONTENT_REVISION)
+    return (f"(({alias}.kind='tnef' AND {alias}.content_revision < {tnef_revision})"
+            f" OR ({alias}.content_revision < {dbm.MAIL_CLASSIFICATION_REVISION}"
+            f" AND {alias}.kind IN ('pdf','skipped') AND ({suspect_name})))")
+
+
+def _repair_legacy_mail_parts(con, root_ids: list[int] | None = None) -> int:
+    """Ausgewählte Alt-Teile einmal am tatsächlichen Inhalt prüfen; keine Texterkennung und kein FTS-Neuaufbau.
+
+    Die MIME-Adresse gilt nur für genau den damals eingelesenen Mailinhalt (SHA-256 prüfen). Unerreichbare oder
+    zwischenzeitlich geänderte Mails bleiben ungeprüft. Ein echtes neutrales PDF erhält nur die Prüfversion.
+    Neu erkannte Arten und alte TNEF-Container (korrigierte Namen/Textkodierung) werden neu gelesen.
+    """
+    from . import mail as mailmod
+    from itertools import groupby
+    scope, args = _root_scope(root_ids, "f.root_id")
+    rows = con.execute(
+        "SELECT t.*,f.relpath,f.sha256 AS mail_sha,r.path AS root FROM parts t JOIN files f ON f.id=t.file_id"
+        " JOIN roots r ON r.id=f.root_id WHERE f.kind='mail' AND f.status='done' AND " + _legacy_content_sql()
+        + scope + " ORDER BY f.id,t.part_no", args).fetchall()
+    changed = 0
+    for file_id, grouped in groupby(rows, key=lambda r: r["file_id"]):
+        parts = list(grouped)
+        first = parts[0]
+        full = os.path.join(first["root"], first["relpath"])
+        try:
+            if os.path.getsize(full) > mailmod.MAX_MAIL_BYTES:
+                continue
+            with open(full, "rb") as src:
+                data = src.read(mailmod.MAX_MAIL_BYTES + 1)
+            if len(data) > mailmod.MAX_MAIL_BYTES or hashlib.sha256(data).hexdigest() != first["mail_sha"]:
+                continue
+        except OSError:
+            continue
+        for part in parts:
+            if part["note"] in dbm.OUTDATED_PART_NOTES:
+                continue             # schon eindeutig vorgemerkt; wird gleich neu eingelesen
+            raw = None if part["kind"] == "tnef" else mailmod.find_part(data, part["mime_path"] or "")
+            new_kind = None
+            if raw is not None:
+                att = mailmod._Att(None, part["mime_path"] or "", part["name"] or "", part["mime"] or "",
+                                   False, raw, "skipped")
+                try:
+                    new_kind = mailmod._classify_content(att, 0).kind
+                except (ValueError, OSError):
+                    continue
+            reread = part["kind"] == "tnef" or (new_kind in (*mailmod.EVALUATED_KINDS, "tnef")
+                                                and new_kind != part["kind"])
+            note = (dbm.OUTDATED_PART_NOTES[0] if part["kind"] == "tnef" or new_kind == "tnef"
+                    else dbm.LEGACY_CLASSIFICATION_NOTE)
+            con.execute("UPDATE parts SET content_revision=?,note=CASE WHEN ? THEN ? ELSE note END"
+                        " WHERE file_id=? AND part_no=?",
+                        (dbm.MAIL_CONTENT_REVISION, reread, note, file_id, part["part_no"]))
+            changed += bool(reread)
+    return changed
+
+
+def _repair_truncated_reuse(con, root_ids: list[int] | None = None) -> int:
+    """Ältere Anhänge mit gekürzt übernommenen Seiten erkennen, solange der begrenzte Donor noch bekannt ist.
+
+    Alle betroffenen Teile vor dem Neulesen markieren: so kann weder die Mail selbst noch eine andere alte
+    Kopie ihre unvollständigen Anhangseiten erneut als vollständigen Inhalt anbieten.
+    """
+    from .mail import REUSED_NOTE
+    scope, args = _root_scope(root_ids)
+    return con.execute(
+        "UPDATE parts SET note=? WHERE kind IN ('pdf','image','word') AND n_pages>0 AND note=?"
+        " AND file_id IN (SELECT id FROM files WHERE kind='mail'" + scope + ")"
+        " AND EXISTS (SELECT 1 FROM files donor WHERE donor.sha256=parts.sha256 AND donor.pages=parts.n_pages"
+        " AND donor.kind IN ('pdf','image','word') AND donor.error LIKE ?)",
+        (dbm.TRUNCATED_REUSE_NOTE, REUSED_NOTE, *args, _TRUNCATED_FILE_NOTE)).rowcount
+
+
+def _refresh_unresolved_links(con, root_ids: list[int] | None = None) -> int:
+    """Später kopierte DOMUS-Ziele finden, ohne unveränderte Mails zu zerlegen oder OCR zu wiederholen."""
+    from .mail import _Folder
+    scope, args = _root_scope(root_ids, "f.root_id")
+    changed = 0
+    folders = {}
+    for row in con.execute(
+            "SELECT t.file_id,t.part_no,t.name,f.relpath,r.path AS root FROM parts t JOIN files f ON f.id=t.file_id"
+            " JOIN roots r ON r.id=f.root_id WHERE t.kind='link' AND t.note IS NULL AND t.name IS NOT NULL"
+            f" AND f.status IN {dbm.SEARCHABLE_SQL}" + scope, args).fetchall():
+        path = Path(row["root"], row["relpath"])
+        folder = _Folder(path, row["root"])
+        key = row["root"], str(folder.dir)
+        target = folders.setdefault(key, folder).find(row["name"])
+        if target is not None:
+            con.execute("UPDATE parts SET note=? WHERE file_id=? AND part_no=?",
+                        (target, row["file_id"], row["part_no"]))
+            changed += 1
+    if changed:
+        dbm.bump_generation(con)
+    return changed
 
 
 def _reset_crashed(con, root_ids: list[int] | None = None) -> None:
@@ -620,18 +753,31 @@ def _prepare(con, r):
     s = os.stat(full)
     sha = sha256_file(full)
     none: frozenset[str] = frozenset()
+    # Ein alter gekürzter Anhang bleibt auch außerhalb des gerade gewählten Ordners als Cache-Donor ungeeignet.
+    from .mail import REUSED_NOTE
     # Nie übernommen wird ein Stand „nur Mailtext“ (Rückfall nach Zeitlimit/Absturz) – weder beim Wiederholen
     # derselben Mail noch für eine gleiche Kopie, sonst fehlten die Anhänge dauerhaft – und ein Stand einer früheren
     # Version mit einem nur vermerkten Teil (winmail.dat vor Format 11)
     if r["sha256"] == sha and con.execute("SELECT 1 FROM pages WHERE file_id=? LIMIT 1", (fid,)).fetchone() \
             and not con.execute("SELECT 1 FROM parts WHERE file_id=? AND note=? LIMIT 1", (fid, _safe_note())).fetchone() \
-            and not dbm.has_outdated_parts(con, fid):
-        return s, sha, _stored(con, fid), True, None, none
+            and not dbm.has_outdated_parts(con, fid) \
+            and not con.execute("SELECT 1 FROM parts t WHERE t.file_id=? AND (t.retryable=1 OR "
+                                + _legacy_content_sql() + ") LIMIT 1", (fid,)).fetchone() \
+            and not con.execute("SELECT 1 WHERE " + _incomplete_mail_sql("?"),
+                                (fid, REUSED_NOTE, _TRUNCATED_FILE_NOTE)).fetchone():
+        res = _stored(con, fid)
+        if _is_mail(r):
+            _relink(res, full, r["root"])
+        return s, sha, res, True, None, none
     src = con.execute(
         "SELECT f.id FROM files f WHERE f.sha256 = ? AND f.id != ? AND f.status IN ('done', 'missing')"
         " AND EXISTS (SELECT 1 FROM pages p WHERE p.file_id = f.id)"
         f" AND NOT EXISTS (SELECT 1 FROM parts t WHERE t.file_id = f.id AND (t.note = ? OR t.note IN {dbm.OUTDATED_IN_SQL}))"
-        " LIMIT 1", (sha, fid, _safe_note(), *dbm.OUTDATED_PART_NOTES)).fetchone()
+        " AND NOT EXISTS (SELECT 1 FROM parts t WHERE t.file_id=f.id AND (t.retryable=1 OR "
+        + _legacy_content_sql() + "))"
+        " AND NOT " + _incomplete_mail_sql("f.id")
+        + " LIMIT 1", (sha, fid, _safe_note(), *dbm.OUTDATED_PART_NOTES,
+                        REUSED_NOTE, _TRUNCATED_FILE_NOTE)).fetchone()
     if src:
         res = _stored(con, src[0])
         if _is_mail(r):
@@ -1257,14 +1403,15 @@ def check_temp_outside(roots) -> None:
                              "geschrieben. TMPDIR auf einen anderen Ordner setzen.")
 
 
-def _count_outdated(con, root_ids: list[int] | None) -> int:
+def _count_outdated(con, root_ids: list[int] | None, notes: tuple[str, ...] | None = None) -> int:
     """Offene Mails mit einem Teil aus einer früheren Version (werden in diesem Lauf neu gelesen)."""
     if not dbm.has_table(con, "parts"):
         return 0
     scope, args = _root_scope(root_ids)
+    notes = dbm.OUTDATED_PART_NOTES if notes is None else notes
+    placeholders = ",".join("?" for _ in notes)
     return con.execute(f"SELECT count(*) FROM files WHERE status = 'pending'{scope} AND id IN"
-                       f" (SELECT file_id FROM parts WHERE note IN {dbm.OUTDATED_IN_SQL})",
-                       (*args, *dbm.OUTDATED_PART_NOTES)).fetchone()[0]
+                       f" (SELECT file_id FROM parts WHERE note IN ({placeholders}))", (*args, *notes)).fetchone()[0]
 
 
 def run_index(con, folders: list[str], engine_name: str = "apple", confirm_missing: bool = False,
@@ -1289,13 +1436,23 @@ def run_index(con, folders: list[str], engine_name: str = "apple", confirm_missi
         for e in s.dir_errors[:10]:
             log(f"   nicht lesbar: {e}")
     scope = ids if folders else None
+    _repair_legacy_mail_parts(con, scope)
+    _repair_truncated_reuse(con, scope)
+    _refresh_unresolved_links(con, scope)
     # Mails mit einer nur vermerkten winmail.dat (Format 10, auch von einem älteren Lauf nach der Umstellung)
     dbm.mark_outdated_mails(con, scope)
     con.commit()
-    outdated = _count_outdated(con, scope)
+    outdated = _count_outdated(con, scope, dbm.OUTDATED_PART_NOTES[:1])
     if outdated:
         log(f"{outdated} E-Mail(s) mit winmail.dat werden neu gelesen – die Anhänge darin werden jetzt ausgewertet "
             "(schon erkannte Seiten werden übernommen).")
+    legacy = _count_outdated(con, scope, (dbm.LEGACY_CLASSIFICATION_NOTE,))
+    if legacy:
+        log(f"{legacy} E-Mail(s) mit früher nicht erkannten Anhängen werden neu gelesen "
+            "(schon erkannte Seiten werden übernommen).")
+    truncated = _count_outdated(con, scope, (dbm.TRUNCATED_REUSE_NOTE,))
+    if truncated:
+        log(f"{truncated} E-Mail(s) mit früher gekürzt übernommenen Anhängen werden neu gelesen.")
     retried = retry_errors(con, root_ids=scope) if retry else 0
     if retried:
         log(f"{retried} Datei(en) mit Fehler werden erneut versucht.")

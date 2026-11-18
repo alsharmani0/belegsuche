@@ -131,7 +131,7 @@ def _attachment_stats(con) -> dict | None:
             tnef["not_read"][why] = tnef["not_read"].get(why, 0) + n
     tnef["outdated"] = con.execute(
         "SELECT count(*) FROM parts t JOIN files f ON f.id = t.file_id WHERE t.part_no > 0 AND f.status = 'done'"
-        f" AND t.note IN {dbm.OUTDATED_IN_SQL}", dbm.OUTDATED_PART_NOTES).fetchone()[0]
+        " AND t.note = ?", (dbm.OUTDATED_PART_NOTES[0],)).fetchone()[0]
     out["tnef"] = tnef
     return out
 
@@ -172,6 +172,15 @@ def build_report(con) -> dict:
     r["mails"], r["words"] = kinds.get("mail", 0), kinds.get("word", 0)
     r["attachments"] = _attachment_stats(con)
 
+    # Die Mail bleibt durchsuchbar, auch wenn die Konvertierung eines einzelnen Anhangs scheitert.
+    # Die konkrete Teilnummer gehört in den Problembericht, nicht nur in die Anzahl ausgelassener Anhänge.
+    retry_parts: dict[int, list[int]] = {}
+    if any(col["name"] == "retryable" for col in con.execute("PRAGMA table_info(parts)")):
+        for fid, number in con.execute("SELECT t.file_id,t.part_no FROM parts t JOIN files f ON f.id=t.file_id "
+                                       "WHERE t.retryable=1 AND f.status='done' ORDER BY t.file_id,t.part_no"):
+            retry_parts.setdefault(fid, []).append(number)
+    r["retryable_mail_parts"] = sum(map(len, retry_parts.values()))
+
     # Auffällige Scan-Seiten je Datei: leer (vermutlich Rückseite) oder unsicher erkannt
     blank: dict[int, list[int]] = {}
     low: dict[int, list[tuple[int, float]]] = {}
@@ -201,7 +210,7 @@ def build_report(con) -> dict:
         " OR (f.status = 'done' AND (f.text_chars = 0 OR f.error IS NOT NULL))")}
     rows = dict(notes)
     # in Blöcken abfragen: mehr IDs als SQLite-Variablen erlaubt ("too many SQL variables")
-    extra_ids = list((set(blank) | set(low)) - set(notes))
+    extra_ids = list((set(blank) | set(low) | set(retry_parts)) - set(notes))
     for chunk in range(0, len(extra_ids), 900):
         ids_ = extra_ids[chunk:chunk + 900]
         rows.update({row["id"]: row for row in con.execute(
@@ -218,6 +227,9 @@ def build_report(con) -> dict:
                       if row["has_pages"] else "noch nicht eingelesen")
         else:   # eingelesen, aber mit Einschränkung
             parts = [row["error"]] if row["error"] else []   # Hinweis, z. B. nicht alle Seiten eingelesen
+            if fid in retry_parts:
+                parts.append(f"Anhang {_pages_list(retry_parts[fid])} vorübergehend nicht lesbar "
+                             "(index --fehler-wiederholen)")
             if row["text_chars"] == 0:
                 parts.append("kein Text erkannt")
             if fid in low:
@@ -263,6 +275,9 @@ def format_report(r: dict, max_problems: int = 25) -> str:
         lines += ["", f"Mail-Anhänge: {att['evaluated']} ausgewertet, {att['reused']} übernommen (gleicher Inhalt), "
                       f"{att['links']} Platzhalter (in DOMUS abgelegt), {att['skipped']} nicht ausgewertet"
                       + (f", {att['duplicates']} doppelt in derselben Mail" if att.get("duplicates") else "")]
+    if r.get("retryable_mail_parts"):
+        lines.append(f"Vorübergehende Anhangfehler: {r['retryable_mail_parts']} – "
+                     "erneut versuchen mit belegsuche index --fehler-wiederholen.")
     tn = (att or {}).get("tnef")
     if tn and tn["n"]:
         nr = sum(tn["not_read"].values())

@@ -1,4 +1,6 @@
 """Unabhängige Regressionen mit ausschließlich künstlichen Dokumenten im temporären Ordner."""
+import csv
+
 import pytest
 
 from belegsuche import db as dbm
@@ -40,6 +42,71 @@ def test_csv_preserves_newlines_in_quoted_fields(tmp_path):
     assert row["suche"].split() == ["Wartung", "Heizung"]
     assert row["notiz"].splitlines() == ["Zeile 1", "Zeile 2"]
     assert [g.label for g in parse_query(row["suche"])] == ["wartung", "heizung"]
+
+
+@pytest.mark.parametrize("delimiter", [";", ",", "\t"])
+def test_excel_csv_preserves_phrase_quotes_and_file_names(tmp_path, delimiter):
+    path = tmp_path / "fragen.csv"
+    expected = {"suche": '"roter Hahn" Vertrag', "datei": 'Akte "Mai".pdf'}
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=expected, delimiter=delimiter)
+        writer.writeheader()
+        writer.writerow(expected)
+    assert load_queries(path) == [expected]
+
+
+def test_unterminated_quote_cannot_absorb_following_queries(tmp_path):
+    path = tmp_path / "fragen.csv"
+    path.write_text('suche;datei;notiz\nKessel;eins.pdf;"offen\nTherme;zwei.pdf;ok\n')
+    with pytest.raises(ValueError, match="CSV"):
+        load_queries(path)
+
+
+def test_distinct_indexed_files_with_equivalent_search_paths(tmp_path):
+    searcher = _index(tmp_path, {"Akte/ROT.pdf": ["Dachstuhl"], "Akte/rot.pdf": ["Ventiltausch"]})
+    queries = [{"suche": "Ventiltausch", "datei": path}
+               for path in ("Akte/ROT.pdf", "Akte/rot.pdf", "AKTE/Rot.pdf", "/Akte/rot.pdf")]
+    rows, _ = evaluate(searcher, queries)
+    assert [(r.rang, r.kategorie) for r in rows] == [
+        (None, "Wortwahl"), (1, "ok"), (None, "Index"), (None, "Index")]
+
+
+def test_search_counts_candidate_pages_before_limiting_hits(tmp_path):
+    searcher = _index(tmp_path, {"a.pdf": ["Kesselwartung", "Kesselwartung"], "b.pdf": ["Kesselwartung"]})
+    response = searcher.search("Kesselwartung", limit=1)
+    assert len(response.hits) == 1
+    assert response.candidates == 3
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_index_update_during_snippet_read_uses_consistent_pages(tmp_path, monkeypatch, batch):
+    searcher = _index(tmp_path, {"ziel.pdf": ["Solarwartung Dachstuhl"]})
+    writer = dbm.connect(searcher.db_path)
+    connect_reader = searcher._connect
+    deleted = []
+
+    def delete_before_snippet(sql):
+        if not deleted and sql.startswith("SELECT text FROM pages WHERE id ="):
+            dbm.delete_search_rows(writer, 1)
+            writer.execute("DELETE FROM files WHERE id=1")
+            writer.commit()
+            deleted.append(True)
+
+    def traced_reader():
+        con = connect_reader()
+        con.set_trace_callback(delete_before_snippet)
+        return con
+
+    monkeypatch.setattr(searcher, "_connect", traced_reader)
+    try:
+        if batch:
+            rows, _ = evaluate(searcher, [{"suche": q, "datei": "ziel.pdf"} for q in ("Dachstuhl", "Solarwartung")])
+            assert [r.rang for r in rows] == [1, 1]
+        else:
+            assert searcher.search("Dachstuhl").hits[0].filename == "ziel.pdf"
+        assert deleted and searcher.search("Dachstuhl").hits == []
+    finally:
+        writer.close()
 
 
 @pytest.mark.parametrize("bad_row,missing", [(";fehler.pdf;1", "suche"),

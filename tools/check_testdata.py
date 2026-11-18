@@ -23,7 +23,9 @@ import re
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import pypdfium2 as pdfium
 from PIL import Image, ImageOps
@@ -109,7 +111,7 @@ def check_files(man: dict) -> dict[str, dict]:
             continue
         if d["kind"] not in {"digital_pdf", "scan_pdf", "garbage_textlayer_pdf", "sammel_pdf",
                               "encrypted_pdf", "corrupt_pdf", "photo_jpg", "png", "tiff_multipage",
-                              "heic", "unsupported", "duplicate_of"}:
+                              "heic", "malformed_docx", "unsupported", "duplicate_of"}:
             fail(f"unbekannter Dateityp im Manifest: {p}")
             continue
         docs[p] = d
@@ -211,6 +213,14 @@ def check_pdfs(docs: dict[str, dict]) -> None:
                 fail(f"{p}: defekte PDF lässt sich öffnen")
             except pdfium.PdfiumError:
                 pass
+        elif k == "malformed_docx":
+            with zipfile.ZipFile(fp) as archive:
+                try:
+                    ET.fromstring(archive.read("word/document.xml"))
+                except ET.ParseError:
+                    pass
+                else:
+                    fail(f"{p}: Word-Dokument enthält das erwartete beschädigte XML nicht")
         elif k in ("photo_jpg", "png"):
             with Image.open(fp) as im:
                 im.verify()
@@ -287,7 +297,7 @@ def check_queries(docs: dict[str, dict]) -> dict[str, list[dict]]:
             s = int(r["seite"])
             if not 1 <= s <= d["pages"]:
                 fail(f"{name}: Seite {s} außerhalb 1..{d['pages']} ({r['datei']})")
-            if d["kind"] in ("duplicate_of", "encrypted_pdf", "corrupt_pdf", "unsupported"):
+            if d["kind"] in ("duplicate_of", "encrypted_pdf", "corrupt_pdf", "malformed_docx", "unsupported"):
                 fail(f"{name}: Ziel ist {d['kind']}: {r['datei']}")
             if not any(f["seite"] == s for f in d["facts"]):
                 fail(f"{name}: keine Fakten für Seite {s} in {r['datei']}")
@@ -502,7 +512,7 @@ def main(argv=None) -> int:
         if a.ocr:
             check_ocr(docs, diagnostic_sets)
     except (OSError, ValueError, KeyError, IndexError, TypeError, pdfium.PdfiumError,
-            subprocess.CalledProcessError) as exc:
+            subprocess.CalledProcessError, zipfile.BadZipFile) as exc:
         fail(f"Prüfung nicht ausführbar: {exc}")
     print()
     print("ERGEBNIS:", "OK" if not FAILS else f"{len(FAILS)} Fehler")

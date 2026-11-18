@@ -14,14 +14,19 @@ from pathlib import Path
 SCHEMA_VERSION = 1
 # Format der Suchtexte (Zusatz-Tokens, Dokument-Index). Ändert es sich, wird der Suchindex aus den
 # gespeicherten Seitentexten neu aufgebaut – ohne neue Texterkennung.
-INDEX_FORMAT = "11"          # 10: E-Mails (Tabellen parts/mails, Mailkopf in der path-Spalte); 11: winmail.dat gelesen
+INDEX_FORMAT = "13"          # TNEF-HTML/RTF und tatsächliche Dateinamen gezielt erneut lesen
+MAIL_CLASSIFICATION_REVISION = 12
+MAIL_CONTENT_REVISION = 13
 # Von diesen Formaten aus ändern sich die vorhandenen Suchzeilen nicht: nur das Format vermerken, kein Neuaufbau
 # (der Index kann über 100.000 Seiten haben; die neuen Tabellen legt SCHEMA an)
-NO_REBUILD_FROM = {"9", "10"}
+NO_REBUILD_FROM = {"9", "10", "11", "12"}
 # Teile, die eine frühere Version nur vermerkt hat und die diese Version liest (Format 10 → 11: winmail.dat). Mails
 # mit so einem Teil liest der nächste Lauf von „belegsuche index“ neu (mark_outdated_mails); ihre übrigen Seiten
 # übernimmt das Neulesen über die sha256 der Anhänge, ohne neue Texterkennung. Bis dahin gilt ihr bisheriger Stand.
-OUTDATED_PART_NOTES = ("nicht ausgewertet (winmail.dat aus Outlook)",)
+LEGACY_CLASSIFICATION_NOTE = "nicht ausgewertet (ältere Anhang-Erkennung)"
+TRUNCATED_REUSE_NOTE = "unvollständig übernommen (älterer gekürzter Seitenbestand)"
+OUTDATED_PART_NOTES = ("nicht ausgewertet (winmail.dat aus Outlook)", LEGACY_CLASSIFICATION_NOTE,
+                       TRUNCATED_REUSE_NOTE)
 TNEF_TYPES = ("application/ms-tnef", "application/vnd.ms-tnef")
 OUTDATED_IN_SQL = "(" + ", ".join("?" * len(OUTDATED_PART_NOTES)) + ")"
 FILE_TOKEN = "0f"            # + files.id, steht in der path-Spalte jeder Seite
@@ -95,6 +100,8 @@ CREATE TABLE IF NOT EXISTS parts (
     sha256     TEXT,
     mime_path  TEXT,                    -- Lage im MIME-Baum, „!k“ = Anhang k einer winmail.dat (mail.find_part)
     note       TEXT,                    -- Hinweis (zu groß, nicht ausgewertet …); bei 'link': Pfad der Datei
+    retryable  INTEGER NOT NULL DEFAULT 0, -- technischer Teilfehler, der explizit wiederholt werden kann
+    content_revision INTEGER NOT NULL DEFAULT 0, -- gezielte Alt-Anhangprüfung schon erfolgt
     PRIMARY KEY (file_id, part_no)
 );
 CREATE INDEX IF NOT EXISTS parts_sha ON parts(sha256);
@@ -160,8 +167,10 @@ def connect(path: Path, readonly: bool = False) -> sqlite3.Connection:
         if not readonly:
             con.execute("PRAGMA journal_mode=WAL")
             con.executescript(SCHEMA)
+            _upgrade_part_columns(con)
             con.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema', ?)", (str(SCHEMA_VERSION),))
             con.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('generation', '0')")
+            _init_persistent_ids(con)
             con.commit()
         con.execute("PRAGMA foreign_keys=ON")
         con.execute("PRAGMA synchronous=NORMAL")
@@ -179,11 +188,41 @@ def connect(path: Path, readonly: bool = False) -> sqlite3.Connection:
                     rebuild_search_index(con)
                 if old == "10":
                     _flag_tnef_read_as_pdf(con)
+                _flag_legacy_retryable_parts(con)
             con.commit()
         return con
     except BaseException:
         con.close()
         raise
+
+
+def _init_persistent_ids(con: sqlite3.Connection) -> None:
+    """Ordnerbefehle und Browserlinks behalten ihre IDs auch nach Löschung und Wiederanlauf."""
+    for table, key in (("roots", "root_id_highwater"), ("files", "file_id_highwater")):
+        con.execute(f"""CREATE TRIGGER IF NOT EXISTS {table}_id_highwater AFTER INSERT ON {table} BEGIN
+            INSERT INTO meta(key,value) VALUES ('{key}', CAST(NEW.id AS TEXT))
+            ON CONFLICT(key) DO UPDATE SET value=CAST(MAX(CAST(value AS INTEGER), NEW.id) AS TEXT);
+        END""")
+        con.execute(f"""INSERT INTO meta(key,value) VALUES (?, (SELECT CAST(coalesce(MAX(id),0) AS TEXT) FROM {table}))
+            ON CONFLICT(key) DO UPDATE SET value=CAST(MAX(CAST(value AS INTEGER),
+            CAST(excluded.value AS INTEGER)) AS TEXT)""", (key,))
+
+
+def _upgrade_part_columns(con: sqlite3.Connection) -> None:
+    con.execute("BEGIN IMMEDIATE")
+    columns = {r[1] for r in con.execute("PRAGMA table_info(parts)")}
+    for name in ("retryable", "content_revision"):
+        if name not in columns:
+            con.execute(f"ALTER TABLE parts ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
+
+
+def _flag_legacy_retryable_parts(con: sqlite3.Connection) -> None:
+    from .mail import legacy_retryable_part_note
+    for file_id, part_no, note in con.execute(
+            "SELECT file_id,part_no,note FROM parts WHERE retryable=0 AND n_pages=0"
+            " AND kind IN ('pdf','image','word') AND note IS NOT NULL").fetchall():
+        if legacy_retryable_part_note(note):
+            con.execute("UPDATE parts SET retryable=1 WHERE file_id=? AND part_no=?", (file_id, part_no))
 
 
 def _flag_tnef_read_as_pdf(con: sqlite3.Connection) -> int:

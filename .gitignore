@@ -9,6 +9,8 @@ __pycache__/
 *.db-wal
 *.db-shm
 *.db-journal
+# Laufdiagnose neben dem Index enthält Pfade aus dem eingelesenen Bestand.
+zeitlimit.log
 testdata/korpus/
 .claude/
 .DS_Store

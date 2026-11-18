@@ -46,6 +46,13 @@ def _eval_k(v: str) -> int:
     return n
 
 
+def _root_id(v: str) -> int:
+    n = _positive(v)
+    if n > 2**63 - 1:
+        raise argparse.ArgumentTypeError("Ordner-ID liegt außerhalb des SQLite-Zahlenbereichs")
+    return n
+
+
 def _safe(s: str) -> str:
     """Steuerzeichen aus Dateinamen/Texten nicht ans Terminal durchreichen."""
     return "".join(c if c.isprintable() or c in "\n\t" else repr(c)[1:-1] for c in str(s))
@@ -59,7 +66,7 @@ def _require_db(args) -> Path | None:
     """Pfad eines vorhandenen Index – vorher ggf. auf das aktuelle Format umstellen (einmalig, meldet sich selbst)."""
     path = _db(args)
     if not path.is_file() or path.stat().st_size == 0:
-        print(f"Noch kein Index vorhanden ({path}). Zuerst: belegsuche index <ordner>")
+        print(f"Noch kein Index vorhanden ({_safe(path)}). Zuerst: belegsuche index <ordner>")
         return None
     with closing(dbm.connect(path, readonly=True)) as con:
         current = dbm.get_meta(con, "index_format") == dbm.INDEX_FORMAT
@@ -114,7 +121,7 @@ def _interrupt(signum, frame):
 
 
 def cmd_index(args) -> int:
-    from .indexer import PERMANENT_ERRORS, acquire_lock, count_safe_mails, run_index
+    from .indexer import PERMANENT_ERRORS, acquire_lock, count_retryable_mails, count_safe_mails, run_index
     path = _db(args)
     roots = [Path(p).expanduser() for p in args.ordner]
     if path.is_file() and path.stat().st_size:
@@ -122,7 +129,7 @@ def cmd_index(args) -> int:
             roots.extend(Path(r[0]) for r in existing.execute("SELECT path FROM roots"))
     if any(_inside_folder(path.resolve(), root) for root in roots):
         raise OSError("Die Index-Datenbank muss außerhalb der eingelesenen Ordner liegen (--db).")
-    with acquire_lock(path):
+    with acquire_lock(path, roots=roots):
         old = {sig: signal.signal(sig, _interrupt) for sig in (signal.SIGHUP, signal.SIGTERM)}
         try:
             with closing(dbm.connect(path)) as con:
@@ -141,6 +148,7 @@ def cmd_index(args) -> int:
                     f" AND coalesce(error,'') NOT IN ({','.join('?' for _ in PERMANENT_ERRORS)})",
                     PERMANENT_ERRORS).fetchone()[0]
                 safe_mails = count_safe_mails(con)
+                partial_mails = count_retryable_mails(con)
         except KeyboardInterrupt:
             print("\nUnterbrochen. Beim nächsten Start geht es an derselben Stelle weiter.")
             return 130
@@ -160,6 +168,9 @@ def cmd_index(args) -> int:
     if safe_mails:
         print(f"{safe_mails} Mail(s) nur mit Mailtext eingelesen (Anhänge nach Zeitlimit oder Absturz übersprungen) – "
               "später erneut versuchen: belegsuche index --fehler-wiederholen")
+    if partial_mails:
+        print(f"{partial_mails} Mail(s) mit vorübergehend nicht lesbaren Anhängen – "
+              "erneut versuchen: belegsuche index --fehler-wiederholen")
     print("Überblick: belegsuche bericht   ·   Suchen: belegsuche start")
     return 0
 
@@ -218,6 +229,7 @@ def cmd_report(args) -> int:
     if path is None:
         return 1
     with closing(dbm.connect(path, readonly=True)) as con:
+        con.execute("BEGIN")
         r = build_report(con)
     print(_safe(format_report(r)))
     if args.csv:
@@ -235,10 +247,10 @@ def cmd_eval(args) -> int:
     try:
         queries = load_queries(Path(args.datei))
     except FileNotFoundError:
-        print(f"Datei nicht gefunden: {args.datei}")
+        print(f"Datei nicht gefunden: {_safe(args.datei)}")
         return 2
     except ValueError as e:
-        print(e)
+        print(_safe(e))
         return 2
     results, summary = evaluate(Searcher(path), queries, k=args.k)
     print(_safe(format_eval(results, summary, k=args.k)))
@@ -255,7 +267,14 @@ def cmd_roots(args) -> int:
     if args.aktion == "umziehen" and _inside_folder(path.resolve(), Path(args.neuer_pfad).expanduser()):
         raise OSError("Der neue Ordner darf die Index-Datenbank nicht enthalten.")
     mutate = args.aktion != "liste"
-    with (acquire_lock(path) if mutate else nullcontext()), closing(dbm.connect(path, readonly=not mutate)) as con:
+    lock = nullcontext()
+    if mutate:
+        with closing(dbm.connect(path, readonly=True)) as existing:
+            roots = [Path(r[0]) for r in existing.execute("SELECT path FROM roots")]
+        if args.aktion == "umziehen":
+            roots.append(Path(args.neuer_pfad).expanduser())
+        lock = acquire_lock(path, roots=roots)
+    with lock, closing(dbm.connect(path, readonly=not mutate)) as con:
         return _roots_action(args, con)
 
 
@@ -303,7 +322,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--parallel", type=int, default=DEFAULT_PARALLEL,
                    help=f"Anzahl paralleler Prozesse für die Texterkennung (Standard hier: {DEFAULT_PARALLEL})")
     s.add_argument("--fehler-wiederholen", action="store_true",
-                   help="Dateien mit Fehlern erneut versuchen (z. B. nach abgezogener SSD)")
+                   help="Fehlerhafte Dateien und Mails mit wiederholbaren Anhangfehlern erneut einlesen")
     s.add_argument("--fehlende-bestaetigen", action="store_true",
                    help="viele fehlende Dateien wirklich als gelöscht markieren")
     s.set_defaults(func=cmd_index)
@@ -330,7 +349,7 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("ordner", parents=[common], help="eingelesene Ordner anzeigen, umziehen oder entfernen")
     s.add_argument("aktion", nargs="?", choices=["liste", "umziehen", "entfernen"], default="liste")
-    s.add_argument("id", nargs="?", type=int)
+    s.add_argument("id", nargs="?", type=_root_id)
     s.add_argument("neuer_pfad", nargs="?")
     s.set_defaults(func=cmd_roots)
 

@@ -45,7 +45,8 @@ Alle Firmen, Personen, Adressen und Bankdaten sind erfunden. IBANs haben die Pr�
 | `garbage_textlayer_pdf` | 2 | Scan + unsichtbare, falsche OCR-Textebene |
 | `encrypted_pdf` | 1 | passwortgeschützt – soll im Fehlerbericht landen |
 | `corrupt_pdf` | 1 | abgeschnittene PDF – soll im Fehlerbericht landen |
-| `unsupported` | 7 | xlsx/docx/msg/zip und Junk (.DS_Store, Thumbs.db, Office-Lockdatei) |
+| `malformed_docx` | 1 | Word-Entwurf mit ungültigem XML; je nach Konverter Lesefehler oder nur über den Dateinamen auffindbar |
+| `unsupported` | 6 | xlsx/msg/zip und Junk (.DS_Store, Thumbs.db, Office-Lockdatei) |
 | `duplicate_of` | 3 | byte-identische Kopie einer anderen Datei |
 
 ## Schwierige Fälle
@@ -89,11 +90,12 @@ Alle Firmen, Personen, Adressen und Bankdaten sind erfunden. IBANs haben die Pr�
   - `Mails/Anhänge/Kostennote_2024-0133_verschlüsselt.pdf`
 - **Defekt (auf 40 % abgeschnitten)**
   - `Mails/Anhänge/INV-93307.pdf`
+- **Beschädigtes Word-Dokument ohne lesbaren Text**
+  - `Verschiedenes/Mietvertrag Entwurf.docx`
 - **Nicht unterstützt / Junk**
   - `Buchhaltung/Nebenkosten 2023.xlsx`
   - `Buchhaltung/~$Nebenkosten 2023.xlsx`
   - `Mails/Anhänge/AW Rechnung Heizung.msg`
-  - `Verschiedenes/Mietvertrag Entwurf.docx`
   - `Mails/Anhänge/Rechnungen_2022.zip`
   - `.DS_Store`
   - `Buchhaltung/Eingang/Scans/Thumbs.db`
@@ -104,7 +106,7 @@ Alle Firmen, Personen, Adressen und Bankdaten sind erfunden. IBANs haben die Pr�
 
 ## manifest.json
 
-In neu erzeugten Manifesten ist `korpus_root` relativ zur Manifestdatei (`korpus`).
+`korpus_root` ist relativ zur Manifestdatei (`korpus`).
 Die Dokumentpfade sind relativ zu diesem Korpusordner.
 
 Ein Eintrag pro Datei: `path` (relativ zu `korpus/`), `kind`, `pages`, `tags`, `readable`,

@@ -27,6 +27,7 @@ import html
 import math
 import os
 import re
+import sqlite3
 import threading
 import time
 import unicodedata
@@ -93,6 +94,18 @@ class Group:
 
 
 @dataclass
+class HitLocation:
+    """Eine echte Fundstelle innerhalb einer Treffergruppe; unabhängig vom Dubletten-Anzeigetext."""
+    file_id: int
+    fullpath: str
+    page_no: int
+    pages: int
+    part_no: int | None = None
+    part_page: int | None = None
+    part_pages: int | None = None
+
+
+@dataclass
 class Hit:
     file_id: int
     relpath: str
@@ -124,6 +137,8 @@ class Hit:
     # DOMUS-Platzhalter der Mail: [{"part_no", "name", "path" (relativ zum Ordner, None = nicht gefunden),
     # "file_id" (die Datei im Index, sonst None)}]
     links: list[dict] = field(default_factory=list)
+    # Haupttreffer und Dubletten mit ihrer eigenen Fundseite (bei Mail-Anhängen auch der Teilseite).
+    locations: list[HitLocation] = field(default_factory=list)
 
     @property
     def fullpath(self) -> str:
@@ -772,10 +787,23 @@ def make_snippet(text: str, terms: set[str], width: int = 260) -> tuple[str, str
         start, end = 0, min(len(text), width)
     else:
         best_i, best_n = 0, -1
+        # Monotones Fenster statt für jede Fundstelle den gesamten Resttext zu prüfen. Die 50 Zeichen
+        # Vorlauf gehören zur Ausschnittbreite: Suchwörter hinter dessen Ende dürfen die Auswahl nicht stärken.
+        right = 0
+        counts: dict[str, int] = defaultdict(int)
         for i, (s, _, _) in enumerate(merged):
-            keys = {k for (s2, e2, k) in merged[i:] if e2 <= s + width}
-            if len(keys) > best_n:
-                best_i, best_n = i, len(keys)
+            right = max(right, i)
+            boundary = max(0, s - 50) + width
+            while right < len(merged) and merged[right][1] <= boundary:
+                counts[merged[right][2]] += 1
+                right += 1
+            if len(counts) > best_n:
+                best_i, best_n = i, len(counts)
+            if right > i:
+                key = merged[i][2]
+                counts[key] -= 1
+                if not counts[key]:
+                    del counts[key]
         start = max(0, merged[best_i][0] - 50)
         end = min(len(text), start + width)
         while start > 0 and not text[start - 1].isspace() and merged[best_i][0] - start < 70:
@@ -864,10 +892,14 @@ class Searcher:
             live = [g for g in live if id(g) in keep]
         return live, unknown, vocab
 
-    def search(self, query: str, limit: int = 30) -> SearchResponse:
+    def search(self, query: str, limit: int = 30, *, snapshot: sqlite3.Connection | None = None) -> SearchResponse:
+        """Über denselben Indexstand suchen, vom ersten Kandidaten bis zum fertigen Textausschnitt."""
         t0 = time.time()
+        if snapshot is not None:
+            return self._search(snapshot, query, limit, t0)
         con = self._connect()
         try:
+            con.execute("BEGIN")
             return self._search(con, query, limit, t0)
         finally:
             con.close()
@@ -991,14 +1023,13 @@ class Searcher:
         live, unknown, _ = self.prepare(con, query)
         if not live:
             return SearchResponse(query, [], unknown, 0, (time.time() - t0) * 1000)
-        cands = self._candidates(con, live)
+        candidate_pages = list(self._candidates(con, live))
         total_imp = sum(g.importance for g in live)
-        cand_list = list(cands)
 
         # 1. Jede Kandidatenseite bewerten
         pages: dict[int, tuple] = {}         # rowid -> (Gewichte je Teil, Begriffe, body, path-Tokens)
-        for chunk in range(0, len(cand_list), 900):
-            ids_ = cand_list[chunk:chunk + 900]
+        for chunk in range(0, len(candidate_pages), 900):
+            ids_ = candidate_pages[chunk:chunk + 900]
             for rid, path, body in con.execute(
                     f"SELECT rowid, path, body FROM fts WHERE rowid IN ({','.join('?' * len(ids_))})", ids_):
                 ptoks = set(path.split())
@@ -1013,7 +1044,7 @@ class Searcher:
                 if any(ws):
                     pages[rid] = (ws, terms, padded, ptoks)
         if not pages:
-            return SearchResponse(query, [], unknown, len(cands), (time.time() - t0) * 1000)
+            return SearchResponse(query, [], unknown, len(candidate_pages), (time.time() - t0) * 1000)
 
         # 2. Seiten ihren Dateien zuordnen
         meta: dict[int, dict] = {}
@@ -1145,6 +1176,16 @@ class Searcher:
             origin = self._container_name(con, f[1], bp[6])          # Anhang in einer winmail.dat
             return f"{path} (Anhang {bp[2]} aus {origin})" if origin else f"{path} (Anhang {bp[2]})"
 
+        def location(f) -> HitLocation:
+            m = meta[f[2]]
+            bp = best_part(f)
+            return HitLocation(
+                file_id=f[1], fullpath=os.path.join(m["root"], m["relpath"]),
+                page_no=m["page_no"], pages=m["pages"] or 1,
+                part_no=bp[2] if bp else None,
+                part_page=m["page_no"] - bp[0] + 1 if bp else None,
+                part_pages=bp[1] - bp[0] + 1 if bp else None)
+
         hits: list[Hit] = []
         for grp in order[:limit]:
             # eine seit dem Einlesen geänderte Kopie (Text veraltet) nur, wenn keine aktuelle erreichbar ist;
@@ -1167,11 +1208,12 @@ class Searcher:
                 # Mail: nur die Fundseite zählt (ein Foto im Anhang macht den PDF-Anhang daneben nicht zum Scan)
                 ocr=(m["source"] or "text") != "text" if m["kind"] == "mail" else bool(m["ocr_pages"]),
                 available=available(m), outdated=m["status"] != "done",
-                duplicates=[where(f) for f in grp if f is not main], kind=m["kind"])
+                duplicates=[where(f) for f in grp if f is not main], kind=m["kind"],
+                locations=[location(main)] + [location(f) for f in grp if f is not main])
             if m["kind"] == "mail":
                 self._add_mail_fields(con, hit, best_part(main), m)
             hits.append(hit)
-        return SearchResponse(query, hits, unknown, len(cands), (time.time() - t0) * 1000)
+        return SearchResponse(query, hits, unknown, len(candidate_pages), (time.time() - t0) * 1000)
 
     @staticmethod
     def _container_name(con, file_id: int, mime_path: str | None) -> str | None:
