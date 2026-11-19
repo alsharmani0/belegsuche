@@ -843,7 +843,8 @@ def test_placeholder_opens_the_linked_file(server_env):
 
 
 SERVE_RUN = r"""
-import sys
+import faulthandler, sys
+faulthandler.dump_traceback_later(25)   # hängt der Start, steht in stderr, wo (Test wartet 30 s)
 from pathlib import Path
 from belegsuche.server import serve
 serve(Path(sys.argv[1]), port=0, open_browser=False)
@@ -867,12 +868,21 @@ def test_serve_removes_copies_when_terminal_closes(tmp_path, sig):
     (fakebin / "open").chmod(0o755)
     env = {**os.environ, "TMPDIR": str(systmp), "PATH": f"{fakebin}:{os.environ['PATH']}",
            "PYTHONPATH": str(PROJECT)}
-    p = subprocess.Popen([sys.executable, "-u", "-c", SERVE_RUN, str(db)], cwd=PROJECT, env=env, text=True,
-                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+    # stderr in eine Datei (keine volle Pipe): Scheitert der Start, zeigt die Meldung die Ausgabe und den Stack-Dump.
+    errfile = tmp_path / "server-stderr.txt"
+    with open(errfile, "w") as err:
+        p = subprocess.Popen([sys.executable, "-u", "-c", SERVE_RUN, str(db)], cwd=PROJECT, env=env, text=True,
+                             stdout=subprocess.PIPE, stderr=err, start_new_session=True)
     try:
         import select
-        assert select.select([p.stdout], [], [], 30)[0], "Server meldet sich nicht"
-        line = p.stdout.readline()
+        ready = select.select([p.stdout], [], [], 30)[0]
+        line = p.stdout.readline() if ready else ""
+        if "127.0.0.1:" not in line:
+            if p.poll() is None:
+                os.killpg(p.pid, signal.SIGKILL)
+                p.wait()
+            pytest.fail(f"Server meldet sich nicht (bereit={bool(ready)}, Exitcode={p.returncode}, "
+                        f"Zeile={line!r}). stderr:\n{errfile.read_text(errors='replace')[-6000:]}")
         port = int(line.split("127.0.0.1:")[1].split("/")[0])
         c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
         c.request("POST", "/api/open", body=json.dumps({"id": fid, "part": 1}),

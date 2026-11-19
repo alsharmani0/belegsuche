@@ -902,7 +902,9 @@ def test_many_small_crafted_winmail_in_one_mail_share_one_budget(tmp_path):
     t0 = time.time()
     res = extract_full(p, BytesEngine())
     t_read = time.time() - t0
-    assert t_shas < 2.0 and t_read < 2.0, (t_shas, t_read)          # je winmail.dat ein Budget: über 3 s
+    # Je winmail.dat ein eigenes Budget hieße über 3 s. Der GitHub-Runner ist langsamer (19.11.: 2,17 s), dort 2,5 s.
+    grenze = 2.5 if os.environ.get("CI") else 2.0
+    assert t_shas < grenze and t_read < grenze, (t_shas, t_read)
     assert shas == [hashlib.sha256(pdf).hexdigest()]
     assert res.parts[2].kind == "pdf" and res.parts[2].n_pages == 1
     from belegsuche import tnef as tnef_mod
