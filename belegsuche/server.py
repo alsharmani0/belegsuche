@@ -21,6 +21,7 @@ import mimetypes
 import os
 import re
 import signal
+import socketserver
 import sqlite3
 import stat
 import subprocess
@@ -30,7 +31,8 @@ import threading
 import time
 import unicodedata
 import webbrowser
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer as _StdThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -801,6 +803,16 @@ def _returncode(result) -> int:
     """Rückgabewert eines Programmstarts; None/ohne returncode gilt als Erfolg (0)."""
     code = getattr(result, "returncode", 0)
     return code if isinstance(code, int) else 0
+
+
+class ThreadingHTTPServer(_StdThreadingHTTPServer):
+    """Wie http.server.ThreadingHTTPServer (gleicher Name, damit Tests ihn weiter ersetzen können), aber ohne Namensabfrage:
+    HTTPServer.server_bind() fragt per socket.getfqdn() den Rechnernamen ab (Rückwärts-DNS). Das kann ohne Netz oder bei
+    langsamem DNS lange hängen (GitHub-Runner: über 25 s) und wird hier nicht gebraucht; gebunden wird nur 127.0.0.1."""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 def serve(db_path: Path, port: int = 8765, open_browser: bool = True) -> int:
