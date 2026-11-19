@@ -229,7 +229,7 @@ def test_unrelated_sqlite_database_with_only_a_view_is_not_adopted(tmp_path):
 
 def test_format_marker_and_rebuilt_rows_are_committed_together(synthetic, monkeypatch):
     root, db, con, calls = synthetic
-    (root / "rechnung.pdf").write_text("Dachdecker Kowalski Rechnung Hospitalstraße, 62")
+    (root / "rechnung.pdf").write_text("Dachdecker Kowalski Rechnung Beispielstraße, 62")
     indexer.run_index(con, [str(root)], engine=object(), log=quiet)
     con.execute("UPDATE fts SET body='kowalski'")
     dbm.set_meta(con, "index_format", "8")
@@ -249,7 +249,7 @@ def test_format_marker_and_rebuilt_rows_are_committed_together(synthetic, monkey
     dbm.connect(db).close()
     assert visible == [dbm.INDEX_FORMAT]
     assert len(calls) == 1
-    assert [h.filename for h in Searcher(db).search("Hospitalstraße 62").hits] == ["rechnung.pdf"]
+    assert [h.filename for h in Searcher(db).search("Beispielstraße 62").hits] == ["rechnung.pdf"]
 
 
 def test_changed_during_reindex_keeps_previous_searchable_text(synthetic, monkeypatch):
