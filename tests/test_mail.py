@@ -223,8 +223,8 @@ def test_missing_date_uses_file_time_and_draft_is_marked(tmp_path):
     p = make_eml(tmp_path / "m.eml", date=None, text="Entwurf Text", headers={"X-Unsent": "1"})
     os.utime(p, (1_700_000_000, 1_700_000_000))
     res = extract_full(p, None)
-    assert "(Änderungsdatum der Datei – Mail ohne Datum)" in res.pages[0].text
-    assert "Entwurf (nicht gesendet)" in res.pages[0].text
+    assert "(Speicherdatum der Datei, nicht das Sendedatum)" in res.pages[0].text
+    assert "Entwurf (nicht gesendet)" in res.pages[0].text      # ohne Sendevermerk des CRM (test_mail_head_notes)
     shown = datetime.fromtimestamp(1_700_000_000).strftime("%d.%m.%Y")
     assert shown in res.pages[0].text                   # nur angezeigt: kein Sendedatum (siehe test_mail_review)
     assert res.mail.sent_at is None

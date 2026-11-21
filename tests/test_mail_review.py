@@ -378,7 +378,7 @@ def test_unevaluated_attachment_name_still_finds_the_mail(tmp_path):
     assert [h.filename for h in hits] == ["m.eml"]
 
 
-# --- A4: Mail ohne Date-Kopf: Dateidatum nicht als Datum durchsuchbar ----------------------------------------
+# --- A4: Mail ohne Date-Kopf: Speicherdatum nicht als Datum durchsuchbar -------------------------------------
 
 def test_file_time_of_mails_without_date_does_not_flood_date_search(tmp_path):
     root = tmp_path / "ordner"
@@ -390,7 +390,7 @@ def test_file_time_of_mails_without_date_does_not_flood_date_search(tmp_path):
     db, con = index(tmp_path, root)
     assert [h.filename for h in Searcher(db).search("03.02.2023").hits] == ["rechnung.eml"]
     hit = Searcher(db).search("Vorgang 3").hits[0]
-    assert hit.mail_date == "03.02.2023 10:00 (Dateidatum)"
+    assert hit.mail_date == "03.02.2023 10:00 (Speicherdatum, nicht Sendedatum)"
     assert con.execute("SELECT count(*) FROM mails WHERE sent_at IS NULL").fetchone()[0] == 5
     text = con.execute("SELECT text FROM pages p JOIN files f ON f.id = p.file_id WHERE f.relpath = 'm3.eml'"
                        ).fetchone()[0]
@@ -903,14 +903,15 @@ def test_ui_lists_linked_files_with_open_button():
     hit = {"id": 5, "filename": "m.eml", "folder": "Emails", "root": "/r", "page": 1, "pages": 1,
            "snippet": "Text", "matched": [], "missing": [], "ocr": False, "available": True, "duplicates": [],
            "pdf": False, "kind": "mail", "part_no": 0, "part_name": None, "part_kind": "body", "part_page": 1,
-           "part_pages": 1, "mail_subject": "S", "mail_from": None, "mail_date": "03.02.2023 10:00 (Dateidatum)",
+           "part_pages": 1, "mail_subject": "S", "mail_from": None,
+           "mail_date": "03.02.2023 10:00 (Speicherdatum, nicht Sendedatum)",
            "links": [{"part_no": 1, "name": "<b>Vertrag</b>.pdf", "path": "V/x.pdf", "file_id": 9},
                      {"part_no": 2, "name": "Fehlt.pdf", "path": None, "file_id": None}]}
     row = run_ui(json.dumps([hit]), "console.log(JSON.stringify(HITS.map(hitRow)));")[0]
     assert "In DOMUS abgelegt: &lt;b&gt;Vertrag&lt;/b&gt;.pdf" in row and "<b>Vertrag" not in row
     assert "openFile(5, false, this, 1)" in row and "openFile(5, false, this, 2)" not in row
     assert "Fehlt.pdf (nicht im Vorgangsordner)" in row
-    assert "03.02.2023 10:00 (Dateidatum)" in row
+    assert "03.02.2023 10:00 (Speicherdatum, nicht Sendedatum)" in row
 
 
 # --- B10: doppelter Anhang in derselben Mail im Bericht ---------------------------------------------------------

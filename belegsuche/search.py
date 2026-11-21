@@ -64,6 +64,7 @@ DOC_START_MARKERS = (" seite 1 von ", " blatt 1 von ", " seite 1 1 ")
 QUANTIFIERS = {"alle", "allen", "saemtliche", "saemtlichen", "jede", "jeder", "jedes", "gesamte", "gesamten"}
 SCOPE_FACTOR = 0.3
 REF_MERGE_MARGIN = 0.1       # Mail, die eine Datei nur nennt (Platzhalter, gleicher Anhang): Datei vorn, wenn fast gleich gut
+NO_DATE_HIT_SUFFIX = " (Speicherdatum, nicht Sendedatum)"   # Trefferzeile einer Mail ohne Date-Kopf
 
 
 @dataclass
@@ -133,7 +134,7 @@ class Hit:
     part_pages: int | None = None
     mail_subject: str | None = None
     mail_from: str | None = None
-    mail_date: str | None = None      # „12.03.2021 14:05“ (ohne Date-Kopf: „… (Dateidatum)“)
+    mail_date: str | None = None      # „12.03.2021 14:05“ (ohne Date-Kopf: Speicherzeit mit NO_DATE_HIT_SUFFIX)
     # DOMUS-Platzhalter der Mail: [{"part_no", "name", "path" (relativ zum Ordner, None = nicht gefunden),
     # "file_id" (die Datei im Index, sonst None)}]
     links: list[dict] = field(default_factory=list)
@@ -1235,8 +1236,9 @@ class Searcher:
             if row:
                 hit.mail_subject, hit.mail_from, hit.mail_date = row[0], row[1], dbm.german_date(row[2]) or None
                 if row[2] is None and m["mtime"]:
-                    # Mail ohne Date-Kopf: Änderungszeit der Datei, gekennzeichnet
-                    hit.mail_date = time.strftime("%d.%m.%Y %H:%M", time.localtime(m["mtime"])) + " (Dateidatum)"
+                    # Mail ohne Date-Kopf: Speicherzeit der Datei, gekennzeichnet (sie ist nicht das Sendedatum)
+                    hit.mail_date = (time.strftime("%d.%m.%Y %H:%M", time.localtime(m["mtime"]))
+                                     + NO_DATE_HIT_SUFFIX)
         if dbm.has_table(con, "parts"):
             rows = con.execute("SELECT part_no, name, note FROM parts WHERE file_id = ? AND kind = 'link'"
                                " ORDER BY part_no", (hit.file_id,)).fetchall()

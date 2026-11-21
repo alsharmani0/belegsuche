@@ -105,10 +105,18 @@ def retryable_part_error(error: BaseException) -> bool:
 
 # Zeilen im Kopf von Seite 1, die angezeigt, aber nicht als Mailtext durchsucht werden (index_body_text): Namen
 # der Anhänge (stehen abgewertet in der path-Spalte, sonst stünde die Mail bei der Suche nach einem Dateinamen vor
-# der Datei selbst) und das Ersatzdatum einer Mail ohne Date-Kopf
+# der Datei selbst), das Ersatzdatum einer Mail ohne Date-Kopf und der Vermerk zu X-Unsent (er stammt von der
+# Belegsuche, nicht aus der Mail: sonst träfe „gesendet“ jede Mail aus dem CRM)
 ATTACH_LINE = "Anhänge: "
 LINK_LINE = "Anhang in DOMUS abgelegt: "
-NO_DATE_SUFFIX = "(Änderungsdatum der Datei – Mail ohne Datum)"
+NO_DATE_SUFFIX = "(Speicherdatum der Datei, nicht das Sendedatum)"
+OLD_NO_DATE_SUFFIX = "(Änderungsdatum der Datei – Mail ohne Datum)"   # Zusatz älterer Fassungen, steht noch im Index
+# X-Unsent: 1 heißt „beim Öffnen als Entwurf zeigen“. Das DOMUS-CRM legt so auch seine gesendeten Mails ab und
+# vermerkt den Versand in X-tblEMail-Typ: Sent – das ist dann kein Entwurf
+DRAFT_LINE = "Entwurf (nicht gesendet)"
+CRM_SENT_LINE = "Aus dem CRM gesendet"
+_DISPLAY_ONLY_SUFFIXES = (NO_DATE_SUFFIX, OLD_NO_DATE_SUFFIX)
+_DISPLAY_ONLY_LINES = (DRAFT_LINE, CRM_SENT_LINE)
 DUPLICATE_NOTE = "gleicher Inhalt wie Anhang"
 TNEF_NAME = "winmail.dat"
 TNEF_READ = "ausgewertet"                 # Hinweis einer gelesenen winmail.dat: „ausgewertet: 3 Anhänge“
@@ -377,11 +385,13 @@ def read_head(msg: Message, mtime: float | None) -> _Head:
         lines.append(f"Datum: {dt.strftime('%d.%m.%Y %H:%M')}")
     elif mtime is not None:
         # nur zur Anzeige: nicht durchsuchbar (index_body_text) und nicht in mails.sent_at – sonst träfe die Suche
-        # nach einem Exportdatum alle Mails ohne Date-Kopf
+        # nach einem Exportdatum alle Mails ohne Date-Kopf. Wann die Mail geschrieben oder gesendet wurde, sagt
+        # diese Zeit nicht: das CRM speichert solche Dateien oft erst Tage später und viele auf einmal.
         fdt = datetime.fromtimestamp(mtime).astimezone()
         lines.append(f"Datum: {fdt.strftime('%d.%m.%Y %H:%M')} {NO_DATE_SUFFIX}")
     if header(msg, "X-Unsent") == "1":
-        lines.append("Entwurf (nicht gesendet)")
+        sent = header(msg, "X-tblEMail-Typ").casefold() == "sent"
+        lines.append(CRM_SENT_LINE if sent else DRAFT_LINE)
     sent_at = None
     if dt is not None:
         try:
@@ -1082,11 +1092,13 @@ class _Ctx:
 
 
 def index_body_text(text: str) -> str:
-    """Suchtext einer Seite mit Mailkopf (Seite 1, angehängte Mail): ohne die Zeilen mit den Anhangnamen und ohne
-    das Ersatzdatum (Änderungszeit der Datei). Angezeigt wird die Seite unverändert (siehe db.index_file_text)."""
+    """Suchtext einer Seite mit Mailkopf (Seite 1, angehängte Mail): ohne die Zeilen mit den Anhangnamen, ohne
+    das Ersatzdatum (Speicherzeit der Datei) und ohne den Vermerk „Entwurf“ bzw. „Aus dem CRM gesendet“.
+    Angezeigt wird die Seite unverändert (siehe db.index_file_text)."""
     head, sep, rest = text.partition("\n\n")
     keep = [ln for ln in head.split("\n")
-            if not ln.startswith((ATTACH_LINE, LINK_LINE)) and not ln.endswith(NO_DATE_SUFFIX)]
+            if not ln.startswith((ATTACH_LINE, LINK_LINE)) and not ln.endswith(_DISPLAY_ONLY_SUFFIXES)
+            and ln not in _DISPLAY_ONLY_LINES]
     return "\n".join(keep) + sep + rest
 
 

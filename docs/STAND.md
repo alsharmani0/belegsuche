@@ -3,6 +3,23 @@
 Bedienung und Messbefehle stehen in der [README](../README.md). Die früheren Messwerte sind unten
 getrennt aufgeführt: Die beiden alten Fragenlisten sind kein Blindtest für den aktuellen Code.
 
+## Vermerke im Mailkopf (21.11.2026)
+
+- **Gesendet statt Entwurf:** Das DOMUS-CRM legt auch seine gesendeten Mails mit `X-Unsent: 1` ab und vermerkt
+  den Versand in `X-tblEMail-Typ: Sent`. Solche Mails zeigten „Entwurf (nicht gesendet)“. Jetzt steht dort
+  „Aus dem CRM gesendet“; „Entwurf (nicht gesendet)“ bleibt, wenn der CRM-Typ fehlt oder anders lautet.
+- **Speicherdatum:** Bei einer Mail ohne Date-Kopf heißt der Zusatz zur Speicherzeit der Datei jetzt
+  „(Speicherdatum der Datei, nicht das Sendedatum)“, in der Trefferzeile „(Speicherdatum, nicht Sendedatum)“.
+  Der alte Zusatz „(Änderungsdatum der Datei – Mail ohne Datum)“ und „(Dateidatum)“ ließen sich als Datum der
+  Mail lesen. Die Trefferzeile gilt sofort, auch für einen vorhandenen Index.
+- **Nicht durchsuchbar:** Beide Vermerke und das Ersatzdatum stehen im angezeigten Text, zählen aber nicht als
+  Mailtext. Sonst träfe „gesendet“ jede Mail aus dem CRM.
+- **Vorhandener Index:** Die Kopfzeilen stehen im gespeicherten Seitentext. Das Indexformat bleibt 13, und ein
+  normaler Lauf liest unveränderte Mails nicht neu. `belegsuche index --mailkopf-erneuern` liest genau die Mails
+  neu, deren Kopf noch einen alten Vermerk zeigt; die Seiten der Anhänge werden übernommen, ohne neue
+  Texterkennung. Ein abgebrochener Lauf wird beim nächsten Einlesen fortgesetzt. Ein echter Entwurf behält
+  seinen Vermerk und wird bei jedem Aufruf des Schalters erneut geprüft.
+
 ## Projektprüfung und Indexformat 13
 
 - Entfernte Ordner- und Datei-IDs werden im selben Index künftig freigehalten. Ein alter Browserlink auf

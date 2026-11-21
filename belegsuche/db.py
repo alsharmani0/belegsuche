@@ -25,8 +25,11 @@ NO_REBUILD_FROM = {"9", "10", "11", "12"}
 # übernimmt das Neulesen über die sha256 der Anhänge, ohne neue Texterkennung. Bis dahin gilt ihr bisheriger Stand.
 LEGACY_CLASSIFICATION_NOTE = "nicht ausgewertet (ältere Anhang-Erkennung)"
 TRUNCATED_REUSE_NOTE = "unvollständig übernommen (älterer gekürzter Seitenbestand)"
+# Mailkopf mit einem Vermerk einer früheren Version („Entwurf“ für gesendete CRM-Mails, alter Datumszusatz). Nur
+# „belegsuche index --mailkopf-erneuern“ setzt diesen Hinweis (indexer.flag_stale_mail_heads), nie ein Lauf von selbst.
+STALE_MAIL_HEAD_NOTE = "Mailkopf mit Vermerk einer früheren Version"
 OUTDATED_PART_NOTES = ("nicht ausgewertet (winmail.dat aus Outlook)", LEGACY_CLASSIFICATION_NOTE,
-                       TRUNCATED_REUSE_NOTE)
+                       TRUNCATED_REUSE_NOTE, STALE_MAIL_HEAD_NOTE)
 TNEF_TYPES = ("application/ms-tnef", "application/vnd.ms-tnef")
 OUTDATED_IN_SQL = "(" + ", ".join("?" * len(OUTDATED_PART_NOTES)) + ")"
 FILE_TOKEN = "0f"            # + files.id, steht in der path-Spalte jeder Seite

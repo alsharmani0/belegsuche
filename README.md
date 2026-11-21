@@ -79,6 +79,10 @@ python3 -m venv .venv && .venv/bin/pip install -e .
 # Dateien mit Fehlern erneut versuchen (z. B. nachdem die SSD mitten im Lauf abgezogen wurde),
 # auch Mails, denen wegen eines Zeitlimits oder vorübergehenden Lesefehlers Anhangstext fehlt
 .venv/bin/belegsuche index --fehler-wiederholen
+
+# Einmal nach einem Update: Mails neu lesen, deren Kopf noch einen Vermerk einer früheren Version zeigt
+# („Entwurf“ bei gesendeten CRM-Mails, alter Datumszusatz) – ohne neue Texterkennung
+.venv/bin/belegsuche index --mailkopf-erneuern
 ```
 
 Die Texterkennung läuft parallel in mehreren Prozessen (Standard: Anzahl Kerne − 2, höchstens 8;
@@ -244,8 +248,14 @@ dort nur die eingebauten.
   Absender zählen bei allen Seiten einer Mail mit, so findet „Absender + Betrag“ auch den Betrag im Anhang.
   Die Namen der Anhänge stehen auf Seite 1, zählen bei der Suche aber nur so viel wie ein Dateiname: Wer nach
   einem Dateinamen sucht, bekommt die Datei vor der Mail, die sie nur nennt.
-  - Fehlt der Date-Kopf (Entwürfe aus DOMUS), zeigt der Treffer die Änderungszeit der Datei als „(Dateidatum)“;
-    sie ist nicht als Datum durchsuchbar.
+  - Fehlt der Date-Kopf (viele Mails aus dem DOMUS-CRM), zeigt der Treffer die Speicherzeit der Datei mit dem
+    Zusatz „(Speicherdatum, nicht Sendedatum)“. Sie sagt nicht, wann die Mail geschrieben oder gesendet wurde,
+    und ist nicht als Datum durchsuchbar.
+  - Eine Mail mit `X-Unsent: 1` trägt im Kopf den Vermerk „Entwurf (nicht gesendet)“. Das DOMUS-CRM legt aber
+    auch seine gesendeten Mails so ab und vermerkt den Versand in `X-tblEMail-Typ: Sent`; dann steht dort
+    „Aus dem CRM gesendet“. Beide Vermerke werden angezeigt, zählen aber nicht als Mailtext. Ein Index aus
+    einer früheren Version zeigt bei gesendeten CRM-Mails noch „Entwurf (nicht gesendet)“ und den alten
+    Datumszusatz, bis `belegsuche index --mailkopf-erneuern` diese Mails einmal neu gelesen hat.
   - Kopfzeilen mit rohen Umlauten in Latin-1/Windows-1252 (alte Programme) werden richtig gelesen, ebenso
     Mailtexte, die als UTF-8 angegeben, aber in Windows-1252 geschrieben sind.
   - Kleine Bilder im Mailtext (Signatur-Logos), gleiche Bilder in derselben Mail und Signaturen (`smime.p7s`)

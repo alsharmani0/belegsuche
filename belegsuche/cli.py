@@ -136,6 +136,7 @@ def cmd_index(args) -> int:
                 scans, ps = run_index(con, args.ordner, engine_name=args.ocr,
                                       confirm_missing=args.fehlende_bestaetigen, limit=args.limit,
                                       workers=max(1, args.parallel), retry=args.fehler_wiederholen,
+                                      refresh_mail_heads=args.mailkopf_erneuern,
                                       log=lambda s: print(_safe(s)))
                 if ps.interrupted:
                     return 130
@@ -323,6 +324,9 @@ def main(argv: list[str] | None = None) -> int:
                    help=f"Anzahl paralleler Prozesse für die Texterkennung (Standard hier: {DEFAULT_PARALLEL})")
     s.add_argument("--fehler-wiederholen", action="store_true",
                    help="Fehlerhafte Dateien und Mails mit wiederholbaren Anhangfehlern erneut einlesen")
+    s.add_argument("--mailkopf-erneuern", action="store_true",
+                   help="E-Mails neu einlesen, deren Kopf noch einen Vermerk einer früheren Version zeigt "
+                        "(„Entwurf“ bei gesendeten CRM-Mails, alter Datumszusatz); ohne neue Texterkennung")
     s.add_argument("--fehlende-bestaetigen", action="store_true",
                    help="viele fehlende Dateien wirklich als gelöscht markieren")
     s.set_defaults(func=cmd_index)

@@ -686,6 +686,24 @@ def _repair_truncated_reuse(con, root_ids: list[int] | None = None) -> int:
         (dbm.TRUNCATED_REUSE_NOTE, REUSED_NOTE, *args, _TRUNCATED_FILE_NOTE)).rowcount
 
 
+def flag_stale_mail_heads(con, root_ids: list[int] | None = None) -> int:
+    """Fertige Mails vormerken, deren Kopf noch einen Vermerk einer früheren Version zeigt: den alten Zusatz zum
+    Ersatzdatum oder „Entwurf (nicht gesendet)“ – so hießen früher auch die Mails, die das DOMUS-CRM als gesendet
+    führt. mark_outdated_mails liest sie danach neu; die Seiten der Anhänge werden über die sha256 übernommen.
+
+    Nur auf ausdrücklichen Wunsch (index --mailkopf-erneuern), nie von selbst. Ein echter Entwurf behält seinen
+    Vermerk und wird bei jedem Aufruf erneut geprüft. Rückgabe: Anzahl der Mails."""
+    from .mail import DRAFT_LINE, OLD_NO_DATE_SUFFIX
+    scope, args = _root_scope(root_ids, "f.root_id")
+    # nur Seiten mit Mailkopf (Seite 1, angehängte Mails) ansehen, nicht die Texte der Anhänge
+    return con.execute(
+        "UPDATE parts SET note=? WHERE part_no=0 AND note IS NULL AND file_id IN"
+        " (SELECT p.file_id FROM pages p JOIN files f ON f.id=p.file_id WHERE f.kind='mail' AND f.status='done'"
+        + scope + " AND (p.page_no=1 OR EXISTS (SELECT 1 FROM parts t WHERE t.file_id=p.file_id AND t.kind='mail'"
+        " AND t.first_page=p.page_no)) AND (instr(p.text, ?) > 0 OR instr(p.text, ?) > 0))",
+        (dbm.STALE_MAIL_HEAD_NOTE, *args, OLD_NO_DATE_SUFFIX, DRAFT_LINE)).rowcount
+
+
 def _refresh_unresolved_links(con, root_ids: list[int] | None = None) -> int:
     """Später kopierte DOMUS-Ziele finden, ohne unveränderte Mails zu zerlegen oder OCR zu wiederholen."""
     from .mail import _Folder
@@ -1416,10 +1434,11 @@ def _count_outdated(con, root_ids: list[int] | None, notes: tuple[str, ...] | No
 
 def run_index(con, folders: list[str], engine_name: str = "apple", confirm_missing: bool = False,
               limit: int | None = None, log: Callable[[str], None] = print, engine=None, workers: int = 1,
-              retry: bool = False):
+              retry: bool = False, refresh_mail_heads: bool = False):
     """Ordner eintragen, durchgehen und offene Dateien verarbeiten.
 
     retry: Dateien mit Fehler (außer passwortgeschützten) vorher erneut als offen markieren.
+    refresh_mail_heads: Mails mit einem Kopfvermerk einer früheren Version neu lesen (flag_stale_mail_heads).
     """
     ids = [add_root(con, f, log) for f in folders]
     roots = con.execute("SELECT id, path FROM roots ORDER BY id").fetchall()
@@ -1439,9 +1458,15 @@ def run_index(con, folders: list[str], engine_name: str = "apple", confirm_missi
     _repair_legacy_mail_parts(con, scope)
     _repair_truncated_reuse(con, scope)
     _refresh_unresolved_links(con, scope)
+    if refresh_mail_heads:
+        flag_stale_mail_heads(con, scope)
     # Mails mit einer nur vermerkten winmail.dat (Format 10, auch von einem älteren Lauf nach der Umstellung)
     dbm.mark_outdated_mails(con, scope)
     con.commit()
+    stale_heads = _count_outdated(con, scope, (dbm.STALE_MAIL_HEAD_NOTE,))
+    if stale_heads:
+        log(f"{stale_heads} E-Mail(s) mit einem Kopfvermerk einer früheren Version werden neu gelesen "
+            "(schon erkannte Seiten werden übernommen).")
     outdated = _count_outdated(con, scope, dbm.OUTDATED_PART_NOTES[:1])
     if outdated:
         log(f"{outdated} E-Mail(s) mit winmail.dat werden neu gelesen – die Anhänge darin werden jetzt ausgewertet "
