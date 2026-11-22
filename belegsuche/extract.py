@@ -22,7 +22,6 @@ PDF_EXT = {".pdf"}
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".heic", ".heif", ".bmp", ".gif", ".webp"}
 MAIL_EXT = {".eml"}
 WORD_EXT = {".doc", ".docx", ".dot", ".dotx", ".dotm", ".rtf", ".odt"}
-SUPPORTED_EXT = PDF_EXT | IMAGE_EXT | MAIL_EXT | WORD_EXT
 
 OCR_DPI = 300
 MAX_RENDER_PX = 5000          # längste Bildseite beim Rendern von PDF-Seiten

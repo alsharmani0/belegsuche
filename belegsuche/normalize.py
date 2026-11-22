@@ -17,7 +17,6 @@ import re
 import unicodedata
 
 AMT, ID, DT, MO, YR = "0amt", "0id", "0dt", "0mo", "0yr"
-INTERNAL_PREFIXES = (AMT, ID, DT, MO, YR, "0hn")
 
 _UMLAUTS = str.maketrans({"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss", "ẞ": "ss"})
 WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
